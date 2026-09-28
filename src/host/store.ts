@@ -1024,6 +1024,26 @@ export class CortexStore {
     })
   }
 
+  /**
+   * Delete a room and everything under it.
+   *
+   * One `rm` on the room dir, because a room owns exactly that subtree:
+   * `room.json`, `seq.txt`, `messages/`, `images/` and `board/` (which holds
+   * every board, its cards and its comments). Removing the subtree rather than
+   * the files individually is what keeps a new kind of room-owned data from
+   * being silently orphaned by a delete that only remembered the old list.
+   */
+  deleteRoom(roomId: string): Promise<CortexResult<boolean>> {
+    return this.write('deleteRoom', async () => {
+      if (!isSafeKey(roomId)) return false
+      const room = await this.getRoom(roomId)
+      if (!room.ok || room.data === null || room.data === undefined) return false
+      const { rm } = await import('node:fs/promises')
+      await rm(this.paths.room(roomId), { recursive: true, force: true })
+      return true
+    })
+  }
+
   /** Delete a board and all its cards/comments. */
   deleteBoard(roomId: string, boardId: string): Promise<CortexResult<boolean>> {
     return this.write('deleteBoard', async () => {

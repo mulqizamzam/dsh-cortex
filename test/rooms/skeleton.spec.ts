@@ -19,6 +19,7 @@ describe('M5 module faces (skeleton contract)', () => {
       'cortex_room_post',
       'cortex_room_read',
       'cortex_room_status',
+      'cortex_room_delete',
     ])
     expect(sessions.TOOLS).toEqual(['cortex_session_spawn', 'cortex_session_send'])
     for (const mod of [rooms, sessions]) {

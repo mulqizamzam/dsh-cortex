@@ -6,7 +6,7 @@
  * nothing here registers an RPC channel of its own.
  *
  * What the module owns:
- *  - the six `cortex_room_*` tools (DESIGN §4);
+ *  - the seven `cortex_room_*` tools (DESIGN §4);
  *  - the `cortex:rooms` per-turn injection seam at order 42 (room mail, ≤5
  *    messages/turn, always labelled, consumed via the per-session ledger);
  *  - the delivery ledger in `service.ts`, shared with the sessions module
@@ -37,6 +37,7 @@ export const TOOLS = [
   'cortex_room_post',
   'cortex_room_read',
   'cortex_room_status',
+  'cortex_room_delete',
 ] as const
 
 export { readEndpoints, writeEndpoints } from './rpc.ts'

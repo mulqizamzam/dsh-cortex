@@ -45,10 +45,10 @@ describe('module wiring (round-12 contract)', () => {
       applyRooms(local.deps)
       applySessions(local.deps)
       // Nine tools, no duplicate name (the host registry would have thrown).
-      expect(local.fake.registeredNames).toHaveLength(9)
-      expect(new Set(local.fake.registeredNames).size).toBe(9)
+      expect(local.fake.registeredNames).toHaveLength(10)
+      expect(new Set(local.fake.registeredNames).size).toBe(10)
       expect(local.fake.registeredNames).toContain('cortex_status')
-      expect(local.fake.registeredNames.filter(name => name.startsWith('cortex_room_'))).toHaveLength(6)
+      expect(local.fake.registeredNames.filter(name => name.startsWith('cortex_room_'))).toHaveLength(7)
       expect(local.fake.registeredNames.filter(name => name.startsWith('cortex_session_'))).toHaveLength(2)
       expect(local.fake.contexts.map(entry => entry.name)).toEqual(['cortex:rooms'])
       // P4: nothing in the wiring produced a warning.
@@ -357,5 +357,107 @@ describe('state-root discipline (P5)', () => {
     const doc = JSON.parse(await readFile(join(harness.root, 'rooms', roomId, 'messages', '000001.json'), 'utf8')) as { seq: number; text: string; roomId: string }
     expect(doc).toMatchObject({ seq: 1, roomId, text: 'check the tree' })
     expect(neutralize(doc.text)).toBe(doc.text)
+  })
+})
+
+describe('cortex_room_delete', () => {
+  /** First call: issues the token and must delete nothing. */
+  async function arm(roomId: string): Promise<Record<string, unknown>> {
+    const armed = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId }, author)
+    expect(armed.status).toBe('ok')
+    expect(armed.deleted).toBe(false)
+    expect(typeof armed.token).toBe('string')
+    // Arming is not deleting: this is the whole point of the two steps.
+    expect(await harness.rooms.get(roomId)).toBeDefined()
+    return armed
+  }
+
+  it('the first call reports the room and deletes nothing', async () => {
+    const roomId = await createRoom()
+    await callTool(harness.fake.tools.get('cortex_room_post'), { roomId, text: 'keep this until deleted' }, author)
+    const armed = await arm(roomId)
+    expect(String(armed.message)).toContain('1 message(s)')
+    expect(String(armed.message)).toContain('not reversible')
+  })
+
+  it('the second call deletes the room, its messages and its boards', async () => {
+    const roomId = await createRoom()
+    await callTool(harness.fake.tools.get('cortex_room_post'), { roomId, text: 'doomed' }, author)
+    const armed = await arm(roomId)
+    const done = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId, confirm: String(armed.token) }, author)
+    expect(done.status).toBe('ok')
+    expect(done.deleted).toBe(true)
+    expect(await harness.rooms.get(roomId)).toBeUndefined()
+    // The whole subtree went, not just room.json: a room that reads back as
+    // "no such room" but still has boards on disk is the bug this asserts.
+    expect(await harness.store.listBoards(roomId)).toMatchObject({ ok: true, data: [] })
+  })
+
+  it('a guessed or literal confirm deletes nothing', async () => {
+    const roomId = await createRoom()
+    for (const confirm of ['DELETE', 'confirm', '', '   ']) {
+      const refused = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId, confirm }, author)
+      expect(refused.status).toBe('refused')
+      expect(await harness.rooms.get(roomId)).toBeDefined()
+    }
+  })
+
+  it('a token cannot be replayed, and does not open another room', async () => {
+    const first = await createRoom('first')
+    const second = await createRoom('second')
+    const armed = await arm(first)
+    const token = String(armed.token)
+
+    // Issued for `first`, presented against `second`: refused, and `second`
+    // survives. `ConfirmTokens.consume` deletes the row BEFORE comparing keys,
+    // so this burns the token rather than leaving it usable — fail-closed, and
+    // the same shape as the memory delete. That is why the next call needs a
+    // fresh token and why `first` is still here.
+    const crossed = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId: second, confirm: token }, author)
+    expect(crossed.status).toBe('refused')
+    expect(await harness.rooms.get(second)).toBeDefined()
+
+    const burned = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId: first, confirm: token }, author)
+    expect(burned.status).toBe('refused')
+    expect(await harness.rooms.get(first)).toBeDefined()
+
+    // A freshly armed token works once and only once.
+    const rearmed = await arm(first)
+    const once = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId: first, confirm: String(rearmed.token) }, author)
+    expect(once.deleted).toBe(true)
+    const twice = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId: first, confirm: String(rearmed.token) }, author)
+    expect(twice.status).toBe('refused')
+  })
+
+  it('an unknown room is refused without a token', async () => {
+    const refused = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId: 'no-such-room' }, author)
+    expect(refused.status).toBe('refused')
+    expect(String(refused.message)).toContain('no such room')
+    expect(refused.token).toBeNull()
+  })
+
+  it('a running member is named in the warning, and the delete still works', async () => {
+    // Refusing here would be unrecoverable: `leave` is reachable only from the
+    // panel's RPC endpoint, so an agent could never clear the block. The member
+    // is named so the cost is visible, and the delete proceeds.
+    const roomId = await createRoom()
+    const armed = await arm(roomId)
+    expect(String(armed.message)).toMatch(/no member is running|WARNING/)
+    const done = await callTool(harness.fake.tools.get('cortex_room_delete'), { roomId, confirm: String(armed.token) }, author)
+    expect(done.deleted).toBe(true)
+  })
+
+  it('rooms.enabled = false refuses and changes nothing', async () => {
+    const off = await makeHarness({ agents: [author] })
+    try {
+      const baseCfg = off.deps.cfg
+      off.deps.cfg = () => ({ ...baseCfg(), rooms: { enabled: false } })
+      applyRooms(off.deps)
+      const refused = await callTool(off.fake.tools.get('cortex_room_delete'), { roomId: 'anything' }, author)
+      expect(refused.status).toBe('refused')
+      expect(String(refused.message)).toContain('rooms.enabled = false')
+    } finally {
+      await off.dispose()
+    }
   })
 })

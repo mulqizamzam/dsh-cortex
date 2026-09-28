@@ -296,5 +296,28 @@ export function roomTools(svc: RoomService, canSpawn: SpawnProbe = () => false):
     },
   } as never)
 
-  return [create, list, join, post, read, status]
+  const remove = defineTool({
+    name: 'cortex_room_delete',
+    description:
+      'Permanently delete one room and everything in it: every message, every image, and every board with its cards and comments. Two steps by design: the first call names the room, reports what is in it and returns a single-use token; the second call must present that token. Without the token nothing is deleted, and the token is bound to the room it was issued for.',
+    parameters: {
+      type: 'object',
+      properties: { roomId: ROOM_ID, confirm: { type: 'string', description: 'The token returned by the first call.' } },
+      required: ['roomId'],
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
+    execute: async (args: never) => {
+      const raw = args as Args
+      const result = await svc.delete({ roomId: stringArg(raw.roomId), confirm: raw.confirm })
+      return neutralizeDeep({
+        status: result.ok ? 'ok' : 'refused',
+        message: result.message,
+        roomId: stringArg(raw.roomId),
+        token: result.token ?? null,
+        deleted: result.deleted === true,
+      })
+    },
+  } as never)
+
+  return [create, list, join, post, read, status, remove]
 }

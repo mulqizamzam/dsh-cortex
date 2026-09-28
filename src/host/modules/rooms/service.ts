@@ -36,6 +36,7 @@ import { isSafeKey, newId } from '../../../lib/ids.ts'
 import { neutralize } from '../../../lib/sanitize.ts'
 import type { HostAgent, HostUserMessage } from '../../dsh.ts'
 import type { ModuleDeps, Room, RoomMember, RoomMemberState, RoomMessage } from '../../types.ts'
+import { ConfirmTokens } from '../memory/ops.ts'
 import { ensureRoomInbox, importRoomImage, roomInboxDir } from './images.ts'
 import { MAIL_LABEL, MAIL_MAX_PER_TURN, mailFromMessage, renderMail, renderMailBlock } from './mail.ts'
 import type { RoomMail } from './mail.ts'
@@ -166,6 +167,20 @@ export interface MemberInput {
  * is cached per state root so the rooms tools, the sessions tools and the
  * `cortex:rooms` context seam share ONE in-memory queue.
  */
+export interface DeleteRoomInput {
+  roomId: string
+  /** The single-use token from the first call; absent means "issue one". */
+  confirm?: unknown
+}
+
+export interface DeleteRoomOutcome {
+  ok: boolean
+  message: string
+  /** Present only on the first call, which deletes nothing. */
+  token?: string
+  deleted?: boolean
+}
+
 export class RoomService {
   private readonly deps: ModuleDeps
   /** `sessionId|roomId` -> highest seq already handed to that session. */
@@ -176,6 +191,8 @@ export class RoomService {
   private readonly primed = new Set<string>()
   /** In-flight watermark writes; {@link flushLedger} awaits them. */
   private readonly pendingWrites = new Set<Promise<void>>()
+  /** Single-use tokens for the two-step delete, keyed to a room id. */
+  private readonly tokens = new ConfirmTokens()
 
   constructor(deps: ModuleDeps) {
     this.deps = deps
@@ -346,6 +363,65 @@ export class RoomService {
       return { ok: false, message: `could not rewrite room ${roomId}: ${errorMessage(error)}` }
     }
     return { ok: true, message: `left room ${roomId}` }
+  }
+
+  /**
+   * Delete a room, in two steps like the memory delete.
+   *
+   * The first call names the room and returns a single-use token bound to that
+   * room id; only the second call, presenting the token, deletes. A mistyped id
+   * therefore cannot destroy anything: the token is issued for the id that
+   * actually resolved, and a token issued for one room does not open another.
+   *
+   * A RUNNING member does not block the delete, and that is deliberate. It was
+   * tempting to refuse: deleting under a live agent feels like breaking
+   * something behind its back. But the premise does not hold. `post` and `read`
+   * both begin with a `get` and answer `no such room: <id>` when it is gone, so
+   * the agent gets a clear, recoverable error on its next call rather than a
+   * silent hang. Refusing would also have been unrecoverable: `leave` is only
+   * reachable from the panel's RPC endpoint, an agent has no tool for it, so a
+   * refused room could never be deleted at all. The running members are named in
+   * the first call instead, so the cost is visible before anyone pays it.
+   */
+  async delete(input: DeleteRoomInput): Promise<DeleteRoomOutcome> {
+    if (!this.enabled) return { ok: false, message: 'rooms are disabled by config (rooms.enabled = false); nothing was changed.' }
+    const roomId = input.roomId.trim()
+    if (roomId === '') return { ok: false, message: 'cortex_room_delete needs a roomId.' }
+    const room = await this.get(roomId)
+    if (room === undefined) return { ok: false, message: `no such room: ${neutralize(roomId)}` }
+
+    const live = room.members.filter(member => this.stateOf(member) === 'running')
+    if (input.confirm === undefined) {
+      const count = room.members.length
+      const listed = await this.deps.store.listBoards(roomId)
+      const boards = listed.ok ? listed.data.length : 0
+      const summary = [
+        `${neutralize(room.title)} (${count} member(s), ${boards} board(s), ${room.lastSeq} message(s))`,
+        live.length === 0
+          ? 'no member is running'
+          : `WARNING: ${live.length} member(s) are still running (${live.map(member => neutralize(String(member.label ?? '?'))).join(', ')}); they will get "no such room" on their next room call`,
+      ].join('; ')
+      return {
+        ok: true,
+        message: `room ${roomId}: ${summary}. Call again with confirm set to the token to delete it. This is not reversible.`,
+        token: this.tokens.issue(roomId),
+        deleted: false,
+      }
+    }
+
+    if (typeof input.confirm !== 'string' || input.confirm.trim() === '') {
+      return { ok: false, message: `cortex_room_delete needs the token from its first call as confirm.` }
+    }
+    if (!this.tokens.consume(input.confirm.trim(), roomId)) {
+      return { ok: false, message: `that token is not valid for room ${roomId} (expired, already used, or issued for another room); nothing was deleted.` }
+    }
+    const removed = await this.deps.store.deleteRoom(roomId)
+    if (!removed.ok) return { ok: false, message: `could not delete room ${roomId}: ${removed.error}` }
+    if (!removed.data) return { ok: false, message: `room ${roomId} vanished before the delete landed; nothing was changed.` }
+    this.primed.clear()
+    for (const [key] of this.consumed) if (key.endsWith(roomId)) this.consumed.delete(key)
+    for (const [sessionId] of this.queue) this.queue.delete(sessionId)
+    return { ok: true, deleted: true, message: `room ${roomId} deleted, with its messages, images and boards. This is not reversible.` }
   }
 
   /** Members that hold a session id (label-only rows cannot receive mail). */
