@@ -1,0 +1,29 @@
+[chk] == C1 module dirs ==
+src/host/modules/delegate/
+src/host/modules/status/
+[chk] == C2 shared-file authorship (git-less): mtime src/host/{index,rpc,rpc-channels,store,types,config,dsh,dsh-internal}.lib/home.ts newer than FOUNDATION snapshot? (harusnya HANYA parent edits) ==
+[chk] == C3 duplicate tool names across modules (expect: none) ==
+'cortex_status'
+[chk] == C4 duplicate context names/orders (expect: none) ==
+      1 cortex:store
+[chk] == C5 no webServer usage anywhere in src ==
+[chk] C5 ok
+[chk] == C6 module writes stay in write-sets ==
+[chk] == C7 brace literal hygiene in SOURCE strings (crude; whitelist sanitize.ts + tests) ==
+src/host/dsh.ts:2: * parameter descriptions alike — must contain no `{{`/`}}`; brace pairs in
+[chk] == C8 settings namespace single ==
+[chk] == C9 gates ==
+      Tests  58 passed (58)
+   Start at  12:03:12
+   Duration  1.06s (transform 244ms, setup 0ms, collect 347ms, tests 434ms, environment 0ms, prepare 82ms)
+
+TSC=2
+BUILD=0
+window.__ModuleLoader__.load({
+	id: "dsh-cortex",
+	factory: 
+[chk] == C10 dist greps (final artifacts) ==
+lib/index.js:0
+lib/client.js:0
+__ModuleLoader__.load({id:"dsh-cortex"
+[chk] DONE fail=0

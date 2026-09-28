@@ -1,0 +1,33 @@
+# dsh-cortex — bundle layer (DESIGN §7).
+#
+# One insert row. `config: {}` = boot on the defaults compiled into
+# src/host/config.ts, which includes the state root: the host `dshHomePath`
+# service resolves `<DSH_HOME>/dsh-cortex`, so nothing is set here (P5/P6).
+#
+# Override BY ROW ID from a later patch layer (the profile's own
+# cordis.patch.yml). Never edit this file inside a profile — `dsh plugin` owns
+# profile files. All values below are PLAIN config fields; do not use
+# `!!js`/expression tags, which this plugin never evaluates.
+#
+#   - insert:
+#       - id: dsh-cortex
+#         config:
+#           stateRoot: ''                            # '' = <DSH_HOME>/dsh-cortex (default); an absolute path relocates ALL plugin data
+#           inject:     { enabled: true, project: false }
+#           caps:       { totalInjectChars: 8000, entryChars: 300 }
+#           memory:     { autoAccept: true }
+#           delegation:
+#             enabled: true                          # heavy effect: OFF by default (P3)
+#             runners:
+#               claude: { argv: ["claude", "-p"], description: "Claude CLI" }
+#
+# Kill switch — keep the row installed but neutralize the plugin without
+# uninstalling (no tools, no injection):
+#
+#   - update:
+#       - id: dsh-cortex
+#         disabled: true
+- insert:
+    - id: dsh-cortex
+      name: dsh-cortex
+      config: {}

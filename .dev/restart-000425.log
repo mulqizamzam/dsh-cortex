@@ -1,0 +1,6 @@
+==> Menghentikan proses lama...
+==> Proses lama bersih.
+==> Cek port 13080...
+!! Port 13080 MASIH DIPAKAI:
+LISTEN 0      511         127.0.0.1:13080      0.0.0.0:*          
+!! Coba: sudo ss -ltnp | grep ':13080'

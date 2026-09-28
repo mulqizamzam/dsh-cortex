@@ -1,0 +1,11 @@
+# Local workspace root: this package is standalone (the parent
+# /home/administrator/agent-workspace/pnpm-workspace.yaml lists only `.`).
+# storeDir/cacheDir stay inside the package: the machine-default store is
+# read-only to the agent sandbox and $TMPDIR is per-shell-invocation here.
+packages:
+  - '.'
+storeDir: ./.pnpm-store
+cacheDir: ./.pnpm-cache
+confirmModulesPurge: false
+allowBuilds:
+  esbuild: set this to true or false

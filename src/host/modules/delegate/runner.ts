@@ -1,0 +1,237 @@
+/**
+ * The delegate module's only process/filesystem boundary. DESIGN §8-M6 makes
+ * CLI spawn M6's own job ("delegation spawn" is explicitly NOT a store
+ * primitive), so `node:child_process` appears here and nowhere else in M2..M6
+ * — and `node:fs/promises` only for `copyFile`, because src/lib has no binary
+ * copy primitive and room-style image copies cannot go through the utf-8
+ * text helpers. Every other byte touches lib/fsx.
+ *
+ * P7: `spawn(exe, args, { shell: false })` — argv arrays end to end, task text
+ * reaches the child only as ONE argv item or as a file path (service.ts), the
+ * env is a plain object, cwd is the plugin state root. There is no code path
+ * from here to a shell string.
+ */
+import { spawn } from 'node:child_process'
+import type { ChildProcessByStdio } from 'node:child_process'
+import type { Readable } from 'node:stream'
+import { copyFile } from 'node:fs/promises'
+import { sizeOf } from '../../../lib/fsx.ts'
+import { errorMessage } from '../../../lib/errors.ts'
+
+export type RunStatus = 'succeeded' | 'failed' | 'killed' | 'timeout'
+
+export interface RunOutcome {
+  status: RunStatus
+  exitCode: number | null
+  error?: string
+}
+
+export interface RunOptions {
+  /** Full argv; item 0 is the executable. Non-empty, validated upstream. */
+  argv: readonly string[]
+  cwd: string
+  env: NodeJS.ProcessEnv
+  /** Hard wall-clock limit; on expiry the whole process group is killed. */
+  timeoutMs: number
+  /** Tail-capped persist targets (flushed atomically, see StreamSink). */
+  stdoutFile: string
+  stderrFile: string
+  capBytes: number
+  /** Grace between SIGTERM and SIGKILL of the process group. */
+  killGraceMs?: number
+  /** State-root writer (store seam): the sink must not bypass the schema gate. */
+  persist: (file: string, text: string) => Promise<{ ok: boolean; error?: string }>
+}
+
+export interface RunningJob {
+  /** OS pid once spawned; undefined until the 'spawn' event fires. */
+  pid: number | undefined
+  outcome: Promise<RunOutcome>
+  /** Request cancellation (settles the outcome as 'killed'). */
+  cancel: () => void
+}
+
+/**
+ * Stream capture with a hard byte cap. The child's output can be hostile or
+ * simply endless (P2), so the sink keeps at most `capBytes` in memory —
+ * dropping the HEAD once the cap trips — and persists by atomic full-file
+ * rewrite (the store exposes no append primitive; a crash costs the last
+ * flush window, which is documented in the module report). Flushes are
+ * time-throttled so a chatty runner cannot turn every chunk into a rewrite.
+ */
+export class StreamSink {
+  private buffer = ''
+  private overflowed = false
+  private dirty = false
+  private lastFlushMs = 0
+  private readonly flushIntervalMs: number
+
+  constructor(
+    private readonly file: string,
+    private readonly capBytes: number,
+    private readonly persist: (file: string, text: string) => Promise<{ ok: boolean; error?: string }>,
+    flushIntervalMs = 250,
+  ) {
+    this.flushIntervalMs = Math.max(50, flushIntervalMs)
+  }
+
+  push(chunk: string): void {
+    if (chunk === '') return
+    this.buffer += chunk
+    if (Buffer.byteLength(this.buffer, 'utf8') > this.capBytes) {
+      // Keep the freshest tail; reserve the marker's BYTE length (it is
+      // multi-byte) so `marker + tail` can never exceed the cap.
+      const markerBytes = Buffer.byteLength(HEAD_DROPPED, 'utf8')
+      const keep = Math.max(0, this.capBytes - markerBytes)
+      this.buffer = tailByBytes(this.buffer, keep)
+      this.overflowed = true
+    }
+    this.dirty = true
+  }
+
+  content(): string {
+    return this.overflowed ? HEAD_DROPPED + this.buffer : this.buffer
+  }
+
+  /** Persist when the throttle allows; force always writes when dirty. */
+  async flush(force = false): Promise<void> {
+    if (!this.dirty) return
+    const now = Date.now()
+    if (!force && now - this.lastFlushMs < this.flushIntervalMs) return
+    this.dirty = false
+    this.lastFlushMs = now
+    try {
+      const written = await this.persist(this.file, this.content())
+      if (!written.ok) throw new Error(written.error ?? 'stream persist refused')
+    } catch {
+      // Disk trouble must not kill the child; the final flush or a warn in
+      // the service reports it. Swallowing HERE is the only quiet spot.
+    }
+  }
+}
+
+export const HEAD_DROPPED = '[… head dropped — output exceeded the per-stream cap …]\n'
+
+/** Last `bytes` of a utf-8 string, snapped to a char boundary by slicing the
+ * string, not the buffer — a torn codepoint would corrupt the tail. */
+export function tailByBytes(text: string, bytes: number): string {
+  if (bytes <= 0) return ''
+  if (Buffer.byteLength(text, 'utf8') <= bytes) return text
+  let low = 0
+  let high = text.length
+  while (low < high) {
+    const mid = (low + high) >>> 1
+    if (Buffer.byteLength(text.slice(mid), 'utf8') < bytes) high = mid
+    else low = mid + 1
+  }
+  return text.slice(low)
+}
+
+/** Copy one already-validated image into the job dir; returns the destination. */
+export async function copyImage(src: string, dest: string, maxBytes: number): Promise<string> {
+  const size = await sizeOf(src)
+  if (size === null) throw new Error('image not readable')
+  if (size > maxBytes) throw new Error(`image exceeds ${String(maxBytes)} bytes`)
+  await copyFile(src, dest)
+  return dest
+}
+
+export function runProcess(options: RunOptions): RunningJob {
+  const stdout = new StreamSink(options.stdoutFile, Math.max(1024, options.capBytes), options.persist)
+  const stderr = new StreamSink(options.stderrFile, Math.max(1024, options.capBytes), options.persist)
+  const [exe = '', ...args] = options.argv
+
+  let child: ChildProcessByStdio<null, Readable, Readable>
+  try {
+    child = spawn(exe, args, {
+      cwd: options.cwd,
+      env: options.env,
+      shell: false,
+      // Own process group, so a timeout/cancel reaches grandchildren too
+      // (killTree below). Windows has no groups — plain kill there.
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    })
+  } catch (error) {
+    return {
+      pid: undefined,
+      outcome: Promise.resolve({ status: 'failed', exitCode: null, error: `spawn failed: ${errorMessage(error)}` }),
+      cancel: () => {},
+    }
+  }
+
+  const pid = child.pid
+  let intent: 'running' | 'killed' | 'timeout' = 'running'
+  let settled = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let graceTimer: ReturnType<typeof setTimeout> | undefined
+
+  const killTree = (signal: NodeJS.Signals): void => {
+    try {
+      if (pid !== undefined && process.platform !== 'win32') process.kill(-pid, signal)
+      else child.kill(signal)
+    } catch {
+      // ESRCH: the group is already gone — exactly what we wanted.
+    }
+  }
+
+  const flushAll = async (): Promise<void> => {
+    await Promise.all([stdout.flush(true), stderr.flush(true)])
+  }
+
+  const outcome = new Promise<RunOutcome>((resolve) => {
+    const settle = (result: RunOutcome): void => {
+      if (settled) return
+      settled = true
+      if (timer !== undefined) clearTimeout(timer)
+      if (graceTimer !== undefined) clearTimeout(graceTimer)
+      void flushAll().then(() => resolve(result), () => resolve(result))
+    }
+
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    const pump = (sink: StreamSink, throttle: { last: number }) => (chunk: string): void => {
+      sink.push(chunk)
+      const now = Date.now()
+      if (now - throttle.last >= 500) {
+        throttle.last = now
+        void sink.flush()
+      }
+    }
+    child.stdout.on('data', pump(stdout, { last: 0 }))
+    child.stderr.on('data', pump(stderr, { last: 0 }))
+
+    timer = setTimeout(() => {
+      if (settled) return
+      intent = 'timeout'
+      killTree('SIGTERM')
+      graceTimer = setTimeout(() => killTree('SIGKILL'), options.killGraceMs ?? 2000)
+    }, Math.max(1, options.timeoutMs))
+    timer.unref?.()
+
+    child.on('error', (error) => {
+      // ENOENT/EACCES arrive HERE (async), never from the spawn() return —
+      // the exit code is null and the message is the honest one.
+      settle({ status: 'failed', exitCode: null, error: `spawn failed: ${errorMessage(error)}` })
+    })
+
+    child.on('close', (code, signal) => {
+      if (intent === 'killed') settle({ status: 'killed', exitCode: code, error: signal === null ? undefined : `killed via ${signal}` })
+      else if (intent === 'timeout') settle({ status: 'timeout', exitCode: code, error: `timed out after ${String(Math.round(options.timeoutMs / 1000))}s` })
+      else if (code === 0) settle({ status: 'succeeded', exitCode: 0 })
+      else settle({ status: 'failed', exitCode: code, error: signal === null ? `exit code ${String(code)}` : `terminated by ${signal}` })
+    })
+  })
+
+  return {
+    pid,
+    outcome,
+    cancel: () => {
+      if (settled) return
+      intent = 'killed'
+      killTree('SIGTERM')
+      graceTimer = setTimeout(() => killTree('SIGKILL'), options.killGraceMs ?? 1000)
+      graceTimer.unref?.()
+    },
+  }
+}

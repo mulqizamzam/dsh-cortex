@@ -1,0 +1,30 @@
+# Delegasi + conflict auto-declare: runner verifikasi (INERT).
+#
+# Tempel blok di bawah (tanpa baris komentar ini) ke AKHIR:
+#   $DSH_HOME/profiles/web/cordis.patch.yml
+# lalu restart host. Setelah verifikasi, HAPUS blok ini kembali.
+#
+# Konvensi baris override di file profil itu `- id: <x>` telanjang, dan
+# `config:` MENGGANTIKAN seluruh config baris. Baris dasar dsh-cortex di bundle
+# plugin adalah `config: {}` (kosong), jadi tidak ada nilai yang perlu
+# direstate ulang di sini.
+#
+# Runner ini tidak melakukan apa-apa selain menunggu 8 detik lalu keluar 0.
+# Kontrak `buildArgv` menambahkan teks task sebagai argv terakhir; script ini
+# mengabaikan argv sepenuhnya, jadi isi task tidak pernah dieksekusi.
+
+- id: dsh-cortex
+  config:
+    delegation:
+      enabled: true
+      maxConcurrent: 2
+      jobTimeoutSec: 60
+      runners:
+        cortex-verify:
+          argv:
+            - /home/administrator/.nvm/versions/node/v24.19.0/bin/node
+            - -e
+            - setTimeout(()=>{}, 8000)
+          description: Conflict-detection live verification (inert 8s timer)
+          timeoutSec: 30
+          env: {}

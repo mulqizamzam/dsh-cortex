@@ -1,0 +1,12 @@
+node_modules/
+lib/
+.pnpm-store/
+.pnpm-cache/
+*.tsbuildinfo
+
+# Build/verification artifacts, not source. The snapshots are .tgz tarballs of
+# dist output and the rollback dir holds copies of a previous bundle; both are
+# reproducible and would add ~5 MB of binary to every clone. The planning docs
+# beside them (.dev/BRIEFS.md, .dev/DISPATCH*.md) ARE tracked.
+.dev/snapshots/
+.dev/rollback/

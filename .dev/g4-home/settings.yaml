@@ -1,0 +1,161 @@
+ui-onboarding:
+  welcomeNoticeVersion: 2026-08-13.1
+llm-pi-ai:
+  providers:
+    nine-router:
+      displayName: 9Router
+      apiKeyEnv: NINE_ROUTER_API_KEY
+      api: openai-completions
+      baseURL: http://localhost:20128/v1
+      # 9Router's combo route strips a client tool named exactly `web_search`
+      # (OpenAI Responses built-in name conventions upstream). The alias keeps
+      # the canonical name in the harness while the wire name passes the proxy.
+      # Removal: if a 9Router update stops reserving the name, delete this
+      # block only — the alias is identity pass-through when absent, so no
+      # code change is needed. Verified live 2026-09-06 (commit 4574a0b1a6).
+      # Note: occasional search timeouts on this route are pre-existing combo
+      # upstream flakiness (probe 9/10), not caused by the alias.
+      toolNameAliases:
+        web_search: webSearch
+      models:
+        - id: BAI/qwen3.8-flash
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: low
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+        - id: glm
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: low
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+        - id: poolmini
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: no_think
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+        - id: BAI2/qwen3.8-flash
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: low
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+        - id: qwen
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: low
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+        - id: Vision
+          contextWindow: 1000000
+          input:
+            - image
+        - id: ds/deepseek-v4-pro
+          contextWindow: 1000000
+        - id: ds/deepseek-v4-pro-max
+          contextWindow: 1000000
+        - id: ds/deepseek-v4-pro-none
+          contextWindow: 1000000
+        - id: ds/deepseek-v4-flash
+          contextWindow: 1000000
+        - id: ds/deepseek-v4-flash-vision-exp
+          contextWindow: 1000000
+        - id: ds/deepseek-chat
+          contextWindow: 1000000
+        - id: ds/deepseek-reasoner
+          contextWindow: 1000000
+        - id: ds/deepseek-flash
+          contextWindow: 1000000
+        - id: Fusion
+          contextWindow: 1000000
+        - id: mimo
+          contextWindow: 1000000
+          reasoningEfforts:
+            off: null
+            minimal: low
+            low: low
+            medium: medium
+            high: high
+            xhigh: high
+            max: high
+agent-default-model:
+  provider: nine-router
+  model: qwen
+  reasoningEffort: max
+llm-deepseek:
+  baseURL: http://localhost:20128/v1
+  models: []
+agent-presets:
+  default: orchestrator
+web-search-deepseek: {}
+ui-conversation:
+  busyEnter: queue
+telegram:
+  media:
+    enabled: false
+    maxBytes: 20971520
+    maxTextChars: 60000
+    ocr:
+      enabled: true
+      languages: eng
+    visionModel: nine-router/GLM
+  enabled: false
+  screenshot:
+    enabled: false
+  cwd: /home/administrator/agent-workspace/project/TeleTeleTele
+  streaming:
+    enabled: true
+    throttleMs: 1200
+mnemon:
+  persistenceStrategy:
+    mode: automatic
+    providerId: mnemon-native
+    prompt: ""
+    rules:
+      allowedProviderIds:
+        - mnemon-native
+      dataBoundary: allow-remote
+      requiredCapabilities:
+        - graph
+        - exact-write
+        - forget
+      preference: local-first
+    providerConnections: {}
+  displayMode: builtin
+  taskAgentModel:
+    mode: fixed
+    provider: nine-router
+    model: glm
+  embedding:
+    enabled: false
+    endpoint: http://localhost:11434
+    model: nomic-embed-text
+    protocol: auto
+    apiKey: ""
+agent-loop: {}
+free-search:
+  provider: tinyfish
+ui-theme:
+  preference: system

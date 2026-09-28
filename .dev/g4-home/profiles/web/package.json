@@ -1,0 +1,6 @@
+{
+  "name": "dsh-profile-web",
+  "private": true,
+  "dependencies": { "dsh-cortex": "link:/home/administrator/agent-workspace/dsh-custom/plugins/dsh-cortex" },
+  "dsh": { "profile": { "bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-cortex"] } }
+}
