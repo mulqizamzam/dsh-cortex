@@ -26,15 +26,16 @@ export function delegateTools(svc: DelegateService): ToolDefinition[] {
       + 'Requires delegation.enabled. Returns a job id immediately; the job runs in the background — poll '
       + 'cortex_delegate_status / cortex_delegate_logs / cortex_delegate_result. The task is delivered to the runner either as the '
       + 'final command-line argument or, when the runner argv contains the double-brace taskFile placeholder token, as the path of a '
-      + 'task.md file written into the job directory; task text is never parsed as flags. Jobs run inside the plugin state root (v1: '
-      + 'workdir outside it is refused). Finished successful jobs write back a labelled log line, a pending memory proposal, and a '
+      + 'task.md file written into the job directory; task text is never parsed as flags. Jobs run in the runner\'s configured '
+      + 'delegation.runners.<name>.cwd (an absolute path set by the operator in config), or in the plugin state root when the runner '
+      + 'declares none; the caller cannot choose the directory. Finished successful jobs write back a labelled log line, a pending memory proposal, and a '
       + 'room message when roomId is given.',
     parameters: {
       type: 'object',
       properties: {
         runner: { type: 'string', description: 'Registered runner name from delegation.runners.' },
         task: { type: 'string', description: 'The task text for the external agent.' },
-        workdir: { type: 'string', description: 'Reserved; refusing anything outside the plugin state root in v1.' },
+        workdir: { type: 'string', description: 'Refused. A job runs in its runner\'s configured delegation.runners.<name>.cwd, or the plugin state root when the runner declares none; the caller never chooses the directory.' },
         images: { type: 'array', items: { type: 'string' }, description: 'Absolute paths INSIDE the plugin state root to attach (copied next to the job, listed in task.md).' },
         includeMemory: { type: 'boolean', description: 'Append a capped, labelled snapshot of plugin memory to the task file.' },
         roomId: { type: 'string', description: 'Room id to post the result message to.' },

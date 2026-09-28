@@ -290,13 +290,14 @@ pid = sha256(normalize(remoteUrl || realpath(cwd)))[0:16]
 | `cortex_session_spawn` | Spawn new session to room |
 | `cortex_session_send` | Send to session |
 
-**Delegation (4 tools)**
+**Delegation (5 tools)**
 | Tool | Description |
 |---|---|
 | `cortex_delegate` | Submit async job |
-| `cortex_delegate_status` | Check job status |
+| `cortex_delegate_status` | Check job status (includes retry info: retryCount, maxRetries, nextRetryAt) |
 | `cortex_delegate_logs` | Tail logs |
 | `cortex_delegate_result` | Get result.md |
+| `cortex_delegate_retry` | Manually retry a dead-letter/failed/timeout job (creates new job) |
 
 **Admin (2 tools)**
 | Tool | Description |
@@ -349,6 +350,10 @@ POST /rpc → connection.rpc.handle('/dsh-cortex-write', handler, { authority: '
       maxConcurrent: 2
       jobTimeoutSec: 3600
       outputCapBytes: 1048576        # 1MB per job log
+      retry:                         # Auto-retry with exponential backoff
+        maxRetries: 0                # 0 = off (P3 safe default); >0 = auto-retry failed/timeout jobs
+        baseDelayMs: 5000            # retry N delay = base × 2^(N-1)
+        maxDelayMs: 60000            # cap per-attempt delay
     caps:                            # Override individual caps
       entryChars: 400
       totalInjectChars: 14000

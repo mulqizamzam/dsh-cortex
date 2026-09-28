@@ -48,7 +48,7 @@ export function apply(deps: ModuleDeps): void {
           pending: config.pending,
           rooms: config.rooms,
           prompts: config.prompts,
-          delegation: { enabled: config.delegation.enabled, runners: Object.keys(config.delegation.runners) },
+          delegation: { enabled: config.delegation.enabled, runners: Object.keys(config.delegation.runners), retry: config.delegation.retry },
           caps: config.caps,
           retention: config.retention,
         },

@@ -339,6 +339,11 @@ export interface JobRow {
   maxRetries?: number
   /** Auto-retry: ISO timestamp when the next retry is scheduled. */
   nextRetryAt?: string
+  /** Why the most recent attempt failed. Present during the `queued` backoff
+   * window, where `error` is cleared — so the row can show the reason. */
+  lastError?: string
+  /** Terminal failure reason, when the host reported one. */
+  error?: string | null
 }
 
 export interface JobsListValue {

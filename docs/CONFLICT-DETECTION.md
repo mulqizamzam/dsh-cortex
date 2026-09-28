@@ -135,5 +135,34 @@ To prove the delegation path live, the web profile carried a temporary override
 (`profiles/web/cordis.patch.yml`, row `- id: dsh-cortex`) that set
 `delegation.enabled: true` and registered one inert runner (`cortex-verify` =
 `node -e setTimeout(…)`, no side effects). Backups taken before each edit:
-`cordis.patch.yml.bak-verify-20260927-232032` and `cordis.patch.yml.bak-sleep-*`.
-Removing that row returns delegation to its shipped default (OFF).
+`cordis.patch.yml.bak-verify-20260927-232032`, `.bak-sleep-*`,
+`.bak-replace-*`.
+
+That override is now the PERMANENT delegation config, and it runs a real agent:
+`dsh-headless` = `dsh --profile headless`, one DSH headless session per job,
+using the host's own model credentials (no second API key). `DSH_HOME` is set
+explicitly in `env` because the headless profile picks its state root from that
+variable and otherwise falls back to `~/.dsh` — a wrong profile that still
+boots. `cortex-verify` is kept as a free smoke-test runner (no model cost).
+
+## Running real delegation: the working directory
+
+A delegation job used to be pinned to the plugin state root, which is useless
+for real work — the child would wake up inside the plugin's own state
+directory. `RunnerSpec` now carries an optional `cwd`.
+
+**The caller still cannot choose it.** `cortex_delegate { workdir }` with any
+path outside the state root is still refused, so task text can never redirect
+where a child executes (P7 is intact). The directory comes only from
+`delegation.runners.<name>.cwd` in the profile config, and falls back to the
+state root when the runner declares none. Only absolute paths are honoured;
+anything else leaves the field absent rather than resolving against an
+arbitrary base.
+
+This also corrects a real bug the live proof exposed: the auto-declared conflict
+claim pointed at the state root no matter where the job actually ran, so a claim
+on a path the job never touched could report a conflict that cannot happen while
+missing the one that can. It now claims `jobCwd`.
+
+Covered by two tests, one of which asserts the CHILD's own `process.cwd()` from
+the echo runner's stdout — not just the recorded job field.

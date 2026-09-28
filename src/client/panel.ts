@@ -89,8 +89,29 @@ function muted(value: unknown): ReactNode {
   return h('span', { style: S.muted }, textSpan(value))
 }
 
+/**
+ * Badge tone → colour, merged into `S.badge` at render time.
+ *
+ * This bundle ships NO stylesheet, so the `cx-badge-<tone>` class carried no
+ * rule anywhere — not in the plugin, not in `lib/client.js`, not in the host.
+ * Every status therefore rendered identically (grey border, transparent fill),
+ * which left the Jobs tab with no visual signal at all. The colours below are
+ * inline for that reason; the className is kept for selectors and tests.
+ *
+ * Tuned against the host's measured panel background `rgb(21,21,23)`, each text
+ * colour clears WCAG AA (4.5:1) on its own translucent fill:
+ * danger ≈7.7:1, warn ≈8.8:1, ok ≈9.3:1, track ≈10.9:1.
+ */
+const BADGE_TONE: Record<string, Record<string, string>> = {
+  ok: { color: '#8fe0b0', background: 'rgba(80,180,120,0.14)', borderColor: 'rgba(80,180,120,0.5)' },
+  warn: { color: '#f2c777', background: 'rgba(210,160,60,0.16)', borderColor: 'rgba(210,160,60,0.55)' },
+  danger: { color: '#ff9d8a', background: 'rgba(200,90,60,0.18)', borderColor: 'rgba(200,90,60,0.65)' },
+  track: { color: '#c3c9d1', borderColor: 'rgba(127,127,127,0.45)' },
+}
+
 function badge(value: unknown, tone?: string): ReactNode {
-  return h('span', { className: `cx-badge cx-badge-${tone ?? 'plain'}`, style: S.badge }, textSpan(value))
+  const key = tone ?? 'plain'
+  return h('span', { className: `cx-badge cx-badge-${key}`, style: { ...S.badge, ...BADGE_TONE[key] } }, textSpan(value))
 }
 
 /** One `Load<T>` slot: idle / loading / error (with retry) / ready (with view). */
@@ -808,6 +829,16 @@ function jobStatusTone(status: string): string {
   return 'plain'
 }
 
+/** The one honest failure reason for a row, or null when there is nothing to
+ * show. `lastError` wins because it is the field that survives the `queued`
+ * backoff window; a terminal job also carries the host's `error`. */
+function jobFailure(job: JobRow): string | null {
+  const reason = job.lastError ?? job.error ?? null
+  if (typeof reason !== 'string') return null
+  const trimmed = reason.trim()
+  return trimmed === '' ? null : summarize(trimmed, 60)
+}
+
 export function JobsTab(props: { state: PanelState['jobs']; model: PanelModel }): ReactNode {
   const { state, model } = props
   const jobs = state.list.kind === 'ready' || state.list.kind === 'error' ? state.list.value?.jobs ?? [] : []
@@ -840,6 +871,11 @@ export function JobsTab(props: { state: PanelState['jobs']; model: PanelModel })
                     h('td', null, job.retryCount !== undefined && job.retryCount > 0
                       ? muted(`retry ${String(job.retryCount)}/${String(job.maxRetries ?? '?')}`)
                       : null),
+                    // Why the last attempt died. This is the only place the
+                    // reason is visible while the job sits `queued` in backoff
+                    // — `error` is cleared for that window, and the `failed`
+                    // transition itself lasts under a millisecond.
+                    h('td', null, jobFailure(job) === null ? null : h('span', { style: { color: '#ff9d8a' } }, jobFailure(job) as string)),
                     h('td', null, live(job)
                       ? button('Cancel', () => void model.cancelJob(job.id), { kind: 'danger', title: 'jobs.cancel' })
                       : (job.status === 'dead-letter' || job.status === 'failed' || job.status === 'timeout')
@@ -860,6 +896,7 @@ export function JobsTab(props: { state: PanelState['jobs']; model: PanelModel })
       h('div', { style: S.row }, codeText(detail.id), badge(detail.status, jobStatusTone(detail.status)), muted(detail.runner)),
       detail.task === undefined ? null : h('div', null, text(detail.task)),
       detail.error === null || detail.error === undefined ? null : h('div', { style: S.error }, text('error: {0}', detail.error)),
+      jobFailure(detail) === null ? null : h('div', { style: { color: '#ff9d8a', fontSize: 12 } }, text('last failure: {0}', jobFailure(detail) as string)),
       detail.writeBack === null || detail.writeBack === undefined ? null : h('div', { style: S.muted }, text('write-back: {0}', detail.writeBack)),
       detail.retryCount !== undefined && detail.retryCount > 0 ? h('div', { style: S.muted }, text('retry {0}/{1}', String(detail.retryCount), String(detail.maxRetries ?? '?'))) : null,
       detail.nextRetryAt !== undefined ? h('div', { style: S.muted }, text('next retry: {0}', detail.nextRetryAt)) : null,

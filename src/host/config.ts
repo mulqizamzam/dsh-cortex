@@ -74,6 +74,7 @@ export const Config = z.object({
       description: z.string().default(''),
       timeoutSec: z.number().default(0),
       env: z.dict(z.string()).default({}),
+      cwd: z.string().default(''),
     })).default({}),
     maxConcurrent: z.number().default(DEFAULT_CONFIG.delegation.maxConcurrent),
     jobTimeoutSec: z.number().default(DEFAULT_CONFIG.delegation.jobTimeoutSec),
@@ -83,7 +84,7 @@ export const Config = z.object({
       baseDelayMs: z.number().default(DEFAULT_CONFIG.delegation.retry.baseDelayMs),
       maxDelayMs: z.number().default(DEFAULT_CONFIG.delegation.retry.maxDelayMs),
     }).default(DEFAULT_CONFIG.delegation.retry),
-  }).default(DEFAULT_CONFIG.delegation),
+  }).default({ ...DEFAULT_CONFIG.delegation, runners: {} }),
   caps: z.object({
     entryChars: z.number().default(DEFAULT_CAPS.entryChars),
     userTrackChars: z.number().default(DEFAULT_CAPS.userTrackChars),
@@ -117,15 +118,20 @@ function text(value: unknown, fallback: string): string {
 function normalizeRunners(input: unknown): Record<string, RunnerSpec> {
   const runners: Record<string, RunnerSpec> = {}
   if (input === null || typeof input !== 'object') return runners
-  for (const [name, spec] of Object.entries(input as Record<string, { argv?: unknown; description?: unknown; timeoutSec?: unknown; env?: unknown }>)) {
+  for (const [name, spec] of Object.entries(input as Record<string, { argv?: unknown; description?: unknown; timeoutSec?: unknown; env?: unknown; cwd?: unknown }>)) {
     const argv = Array.isArray(spec?.argv) ? spec.argv.map(String).filter(item => item !== '') : []
     // P7: a runner with no executable is dropped, never guessed at.
     if (argv.length === 0) continue
+    const cwd = text(spec?.cwd, '')
     runners[name] = {
       argv,
       description: text(spec?.description, ''),
       timeoutSec: capValue(spec?.timeoutSec, 0),
       env: spec?.env !== null && typeof spec.env === 'object' ? { ...(spec.env as Record<string, string>) } : {},
+      // Only an absolute path is honoured; anything else leaves the runner
+      // without `cwd`, so dispatch falls back to the state root instead of
+      // silently resolving a relative path against an arbitrary base.
+      ...(cwd.startsWith('/') ? { cwd } : {}),
     }
   }
   return runners

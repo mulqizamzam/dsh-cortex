@@ -18,6 +18,10 @@
 #           memory:     { autoAccept: true }
 #           delegation:
 #             enabled: true                          # heavy effect: OFF by default (P3)
+#             retry:
+#               maxRetries: 0                        # 0 = no auto-retry; >0 = failed/timeout jobs auto-retry
+#               baseDelayMs: 5000                    # delay(N) = min(base * 2^(N-1), maxDelayMs)
+#               maxDelayMs: 60000                    # exhausted retries -> job lands in the dead-letter queue
 #             runners:
 #               claude: { argv: ["claude", "-p"], description: "Claude CLI" }
 #

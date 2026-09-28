@@ -226,11 +226,50 @@ describe('delegate · gates + argv safety', () => {
     }
   })
 
-  it('external workdir refused (v1), out-of-root image refused, non-image extension refused — no jobs created', async () => {
+  it('a runner\'s configured cwd decides where the child runs (and the claim follows it)', async () => {
+    const elsewhere = await makeTempRoot('dsh-cortex-m6-cwd-')
+    try {
+      const h = await boot({ runners: { echoCwd: runner([process.execPath, ECHO], { cwd: elsewhere }) } })
+      try {
+        const sent = await callTool(h, 'cortex_delegate', { runner: 'echoCwd', task: 'where am i' })
+        expect(sent.status).toBe('dispatched')
+        const jobId = String((sent as { job?: { id?: string } }).job?.id ?? '')
+        expect(jobId).not.toBe('')
+        const recorded = (await h.svc.getJob(jobId)) as Job | null
+        expect(recorded?.cwd).toBe(elsewhere)
+
+        // The CHILD really ran there, not just the bookkeeping: the echo
+        // fixture reports its own process.cwd() on stdout.
+        await new Promise(resolve => { setTimeout(resolve, 400) })
+        const stream = await h.svc.tail('stdout', jobId, 8192)
+        expect(JSON.parse(stream.text.trim()).cwd).toBe(elsewhere)
+      } finally {
+        await teardown(h)
+      }
+    } finally {
+      await removeTempRoot(elsewhere)
+    }
+  })
+
+  it('a runner without cwd falls back to the plugin state root', async () => {
     const h = await boot({})
     try {
+      const sent = await callTool(h, 'cortex_delegate', { runner: 'echoAppend', task: 't' })
+      const jobId = String((sent as { job?: { id?: string } }).job?.id ?? '')
+      expect((await h.svc.getJob(jobId))?.cwd).toBe(h.root)
+    } finally {
+      await teardown(h)
+    }
+  })
+
+  it('caller-set workdir refused, out-of-root image refused, non-image extension refused — no jobs created', async () => {
+    const h = await boot({})
+    try {
+      // The CALLER still cannot choose where a child runs (P7: task text must
+      // never redirect execution). The directory comes from the runner's own
+      // `cwd` in config, not from this argument.
       const w = await callTool(h, 'cortex_delegate', { runner: 'echoAppend', task: 't', workdir: '/tmp' })
-      expect(String(w.message)).toMatch(/workdir is not supported yet/)
+      expect(String(w.message)).toMatch(/workdir cannot be set by the caller/)
       const img = await callTool(h, 'cortex_delegate', { runner: 'echoAppend', task: 't', images: ['/etc/passwd'] })
       expect(String(img.message)).toMatch(/outside the plugin state root/)
       const ext = await callTool(h, 'cortex_delegate', { runner: 'echoAppend', task: 't', images: [join(h.root, 'notes.txt')] })
@@ -475,6 +514,50 @@ describe('delegate · echo fixture end to end', () => {
 })
 
 describe('delegate · auto-retry + dead-letter', () => {
+  it('result.md states the FINAL disposition: dead-letter header + retry history, not a bare "failed"', async () => {
+    const h = await boot({ retry: { maxRetries: 2, baseDelayMs: 40, maxDelayMs: 200 } })
+    try {
+      const out = await callTool(h, 'cortex_delegate', { runner: 'failAlways', task: 'artifact honesty' })
+      const jobId = String((out.job as { id: string }).id)
+      const done = await until('job dead-letter', async () => {
+        const j = await h.svc.getJob(jobId)
+        return j?.status === 'dead-letter' ? j : null
+      }, 5000)
+      // The artifact must not contradict the authoritative state. Live evidence:
+      // job 31e83e1407dc was `dead-letter` in job.json while result.md read
+      // "— failed", because the header was built from the raw run outcome.
+      const result = (await h.svc.readResultFile(jobId)) ?? ''
+      expect(result).toContain(`# Delegate job ${jobId} — dead-letter`)
+      expect(result).not.toMatch(/# Delegate job \S+ — failed/)
+      expect(result).toContain('## dead-letter')
+      expect(result).toContain('2 automatic retries')
+      // Attempt line records the exhausted retry budget.
+      expect(result).toMatch(/attempt: 3 of 3 \(auto-retries: 2\/2\)/)
+      expect(done.retryCount).toBe(2)
+    } finally {
+      await teardown(h)
+    }
+  })
+
+  it('a mid-chain attempt says a retry is scheduled and never claims dead-letter', async () => {
+    const h = await boot({ retry: { maxRetries: 3, baseDelayMs: 400, maxDelayMs: 2000 } })
+    try {
+      const out = await callTool(h, 'cortex_delegate', { runner: 'failAlways', task: 'first attempt' })
+      const jobId = String((out.job as { id: string }).id)
+      const queued = await until('first attempt schedules a retry', async () => {
+        const j = await h.svc.getJob(jobId)
+        return j?.status === 'queued' && (j.retryCount ?? 0) === 1 && j.nextRetryAt !== undefined ? j : null
+      }, 5000)
+      expect(queued.retryCount).toBe(1)
+      const result = (await h.svc.readResultFile(jobId)) ?? ''
+      expect(result).toContain('## auto-retry')
+      expect(result).toContain('retry 1 of 3')
+      expect(result).not.toContain('## dead-letter')
+    } finally {
+      await teardown(h)
+    }
+  })
+
   it('maxRetries=3: failed job auto-retries 3 times then moves to dead-letter', async () => {
     const h = await boot({ retry: { maxRetries: 3, baseDelayMs: 50, maxDelayMs: 200 } })
     try {

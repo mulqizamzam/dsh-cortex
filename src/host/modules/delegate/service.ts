@@ -103,13 +103,15 @@ export class DelegateService {
       return NO(`runner "${neutralize(runner)}" is not registered under delegation.runners (${known.length > 0 ? `known runners: ${known.join(', ')}` : 'the registry is empty'}).`)
     }
 
-    // v1 workdir policy (deliberately narrower than the DESIGN §4 sketch):
-    // external directories are refused outright; every job runs in the plugin
-    // state root. Recorded as a safe deviation in the module report.
+    // The CALLER may not choose where a child runs: an absolute `workdir`
+    // argument is refused outright, so task text can never redirect execution.
+    // The working directory comes from the runner's own `cwd` in config, and
+    // falls back to the plugin state root when the runner declares none.
     const workdir = typeof input.workdir === 'string' ? input.workdir.trim() : ''
     if (workdir !== '' && resolve(workdir) !== resolve(this.deps.store.root)) {
-      return NO('workdir is not supported yet: delegation jobs run inside the plugin state root only (v1 deviation from DESIGN §4).')
+      return NO('workdir cannot be set by the caller: a delegation job runs in its runner\'s configured cwd (delegation.runners.<name>.cwd), or the plugin state root when that is absent.')
     }
+    const jobCwd = spec.cwd !== undefined && spec.cwd !== '' ? spec.cwd : this.deps.store.root
 
     if (input.images !== undefined && !Array.isArray(input.images)) return NO('images must be an array of paths under the plugin state root.')
     const imageSources: string[] = []
@@ -137,7 +139,7 @@ export class DelegateService {
       runner,
       argv: spec.argv,
       task,
-      cwd: this.deps.store.root,
+      cwd: jobCwd,
       ...(projectId ? { projectId } : {}),
       ...(roomId !== '' ? { roomId } : {}),
       ...(agent?.id !== undefined ? { sessionId: String(agent.id) } : {}),
@@ -165,7 +167,10 @@ export class DelegateService {
         const jobTimeoutSec = this.cfg().delegation.jobTimeoutSec
         const result = conflictSvc.declare({
           roomId,
-          path: this.deps.store.root,
+          // The REAL working directory, not the state root: a claim on a path
+          // the job never touches would report a conflict that cannot happen,
+          // and would miss the one that can.
+          path: jobCwd,
           description: `delegate job ${job.id} (runner: ${job.runner})`,
           sessionId: job.sessionId ?? '',
           ttlSeconds: jobTimeoutSec > 0 ? jobTimeoutSec : 3600,
@@ -195,7 +200,7 @@ export class DelegateService {
     const files = this.deps.store.jobPaths(job.id)
     const handle = runProcess({
       argv: buildArgv(spec.argv, job.task ?? task, this.taskFile(job.id)),
-      cwd: this.deps.store.root,
+      cwd: jobCwd,
       env,
       timeoutMs: timeoutSec * 1000,
       stdoutFile: files.stdout,
@@ -406,8 +411,26 @@ export class DelegateService {
       }
     }
 
+    // Disposition is DECIDED before result.md is composed: a job that ends in
+    // the dead-letter queue must not be described as a plain `failed` one, and
+    // an attempt that schedules a retry must say so. (Live evidence: job
+    // 31e83e1407dc was `dead-letter` in job.json while result.md read
+    // "— failed" because the header was built from the raw run outcome.)
+    const retryable = isRetryable(status)
+    const retryCount = job.retryCount ?? 0
+    const maxRetries = job.maxRetries ?? 0
+    const willRetry = retryable && maxRetries > 0 && retryCount < maxRetries
+    const willDeadLetter = retryable && maxRetries > 0 && retryCount >= maxRetries
+    const terminalStatus: string = willDeadLetter ? DEAD_LETTER_STATUS : status
+
+    // Why the last attempt died, in one honest phrase. `error` is deliberately
+    // cleared while a job waits in `queued`, so without persisting this the
+    // entire 2/4/8s backoff read as "queued, exit —" with no reason attached.
+    const failureReason = outcome.error
+      ?? (status === 'timeout' ? 'timed out' : outcome.exitCode === null ? 'failed' : `exit code ${String(outcome.exitCode)}`)
+
     const lines = [
-      `# Delegate job ${job.id} — ${status}`,
+      `# Delegate job ${job.id} — ${terminalStatus}`,
       '',
       RESULT_HEADER,
       '',
@@ -415,6 +438,7 @@ export class DelegateService {
       `- exit code: ${outcome.exitCode === null ? 'n/a' : String(outcome.exitCode)}${outcome.error !== undefined ? ` (${neutralize(outcome.error)})` : ''}`,
       `- started: ${job.startedAt}   finished: ${finishedAt}`,
       `- cwd: ${neutralize(job.cwd ?? this.deps.store.root)}`,
+      `- attempt: ${String(retryCount + 1)} of ${String(Math.max(1, maxRetries + 1))}${maxRetries > 0 ? ` (auto-retries: ${String(retryCount)}/${String(maxRetries)})` : ' (auto-retry disabled)'}`,
       '',
       '## task',
       '',
@@ -425,21 +449,31 @@ export class DelegateService {
       bodyTail === '' ? '(no output)' : bodyTail,
     ]
 
+    if (willRetry) {
+      const next = retryCount + 1
+      const delay = this.retryDelayMs(next)
+      lines.push('', '## auto-retry', `- attempt ${String(retryCount + 1)} did not succeed; retry ${String(next)} of ${String(maxRetries)} is scheduled after ${String(delay)}ms of backoff.`)
+    } else if (willDeadLetter) {
+      lines.push('', '## dead-letter', `- this job used all ${String(maxRetries)} automatic retries without succeeding. It is parked in the dead-letter queue for a human decision; re-dispatch it from the Cortex panel (Jobs tab) or with cortex_delegate_retry.`)
+    }
+
     // Terminal status FIRST: job.json must be authoritative before any
     // side-effecting write-back runs, so a crash mid-write-back can never
     // leave a 'running' corpse behind a completed job.
     await this.patch(job.id, {
-      status,
+      status: terminalStatus as JobStatus,
       exitCode: outcome.exitCode,
       finishedAt,
       ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+      // A success clears the stale failure reason; anything else records it.
+      ...(status === 'succeeded' ? { lastError: undefined } : { lastError: failureReason }),
     })
 
     if (status === 'succeeded') {
       const notes = await this.writeBack({ ...job, finishedAt, exitCode: outcome.exitCode }, summary)
       lines.push('', '## write-back', ...notes.map(note => `- ${note}`))
     } else {
-      lines.push('', '## write-back', `- skipped: the job did not succeed (${status}). Streams and this result stay on disk.`)
+      lines.push('', '## write-back', `- skipped: the job did not succeed (${terminalStatus}). Streams and this result stay on disk.`)
     }
 
     try {
@@ -449,11 +483,8 @@ export class DelegateService {
       this.deps.warn(`delegate: result.md write failed for ${job.id}: ${errorMessage(error)}`)
     }
 
-    // --- auto-retry + dead-letter logic ---
-    // Only failed/timeout outcomes are retried; killed/cancelled by user is final.
-    const retryCount = job.retryCount ?? 0
-    const maxRetries = job.maxRetries ?? 0
-    if (isRetryable(status) && maxRetries > 0 && retryCount < maxRetries) {
+    // --- auto-retry + dead-letter scheduling ---
+    if (willRetry) {
       const nextCount = retryCount + 1
       const delay = this.retryDelayMs(nextCount)
       const nextRetryAt = new Date(Date.now() + delay).toISOString()
@@ -468,15 +499,16 @@ export class DelegateService {
         finishedAt: undefined,
         exitCode: undefined,
         error: undefined,
+        // `error` is cleared above, so re-assert the reason here: this is the
+        // only place it is visible during the backoff wait.
+        lastError: failureReason,
       })
       this.deps.log(`delegate: job ${job.id} retry ${nextCount}/${String(maxRetries)} scheduled in ${String(delay)}ms`)
       this.scheduleRetry(job.id, delay)
-    } else if (isRetryable(status) && maxRetries > 0 && retryCount >= maxRetries) {
-      // Exhausted retries: move to dead-letter queue
-      await this.patch(job.id, { status: asJobStatus(DEAD_LETTER_STATUS) })
+    } else if (willDeadLetter) {
       this.deps.log(`delegate: job ${job.id} moved to dead-letter (exhausted ${String(maxRetries)} retries)`)
     } else {
-      this.deps.log(`delegate: job ${job.id} ${status} (exit ${String(outcome.exitCode)})`)
+      this.deps.log(`delegate: job ${job.id} ${terminalStatus} (exit ${String(outcome.exitCode)})`)
     }
   }
 
@@ -580,9 +612,16 @@ export class DelegateService {
 
     const timeoutSec = spec.timeoutSec > 0 ? spec.timeoutSec : this.cfg().delegation.jobTimeoutSec
     const files = this.deps.store.jobPaths(job.id)
+    // The retry runs where attempt 1 ran. Dispatch resolves the runner's
+    // configured `cwd` into `job.cwd` (falling back to the state root), so a
+    // retry that hardcoded the state root would silently move the work:
+    // `job.json` and result.md both record `job.cwd`, the conflict claim was
+    // declared on it, and a retry writing somewhere else lands in a directory
+    // nothing claimed.
+    const retryCwd = job.cwd !== undefined && job.cwd !== '' ? job.cwd : this.deps.store.root
     const handle = runProcess({
       argv: buildArgv(spec.argv, job.task ?? '', this.taskFile(job.id)),
-      cwd: this.deps.store.root,
+      cwd: retryCwd,
       env: { ...process.env, ...spec.env },
       timeoutMs: timeoutSec * 1000,
       stdoutFile: files.stdout,
@@ -670,6 +709,8 @@ export function delegateEndpoints(svc: DelegateService): { read: Record<string, 
             id: view.id, runner: view.runner, status: view.status,
             startedAt: view.startedAt, finishedAt: view.finishedAt, exitCode: view.exitCode,
             summaryChars: view.taskChars,
+            ...(view.error !== undefined ? { error: view.error } : {}),
+            ...(view.lastError !== undefined ? { lastError: view.lastError } : {}),
             ...(view.retryCount !== undefined ? { retryCount: view.retryCount } : {}),
             ...(view.maxRetries !== undefined ? { maxRetries: view.maxRetries } : {}),
             ...(view.nextRetryAt !== undefined ? { nextRetryAt: view.nextRetryAt } : {}),

@@ -21,6 +21,7 @@ plugin. No core modifications, one disposable state directory.
 | Progress | "kemarin kita sampai mana?" | per-project + daily logs, `cortex_progress_report` |
 | Rooms | "buat ruangan, spawn 2 sub-sesi buat front-end & QA" | real DSH sessions join a room, exchange messages (incl. images via `read_image`), status live, wake idle members |
 | Delegation | "serahkan redesign ke runner X" *(off by default)* | async CLI job, logs streamed, summary auto-written back to project/daily logs + memory proposal, all labelled machine-authored |
+| Retry + Dead-Letter | (automatic on `failed`/`timeout` when `retry.maxRetries > 0`) | auto-retry with exponential backoff → dead-letter queue after exhausting retries; visible in Jobs tab with Retry button |
 | Prompts | "simpan workflow review ini", "injeksi kode-review checklist ke sesi itu" | prompt library; inject once/sticky with honest headers |
 
 Tracks (memory): **user profile · global facts · project facts** (+ project log · daily log).
@@ -75,6 +76,17 @@ whole `config:` value (no deep merge) — restate every key you care about:
 
 Kill-switch without uninstall: `- id: dsh-cortex` `disabled: true` (also stops the
 client bundle; verified mechanism).
+
+### Retry + Dead-Letter
+
+When `delegation.retry.maxRetries > 0`, a job that fails (`failed` or `timeout`)
+is automatically re-dispatched with exponential backoff: delay = `baseDelayMs × 2^(attempt−1)`,
+capped at `maxDelayMs`. Once all retries are exhausted, the job moves to a
+**`dead-letter`** status — it stays on disk as evidence and appears in the UI Jobs tab
+with a red badge and a **Retry** button (manual re-dispatch as a fresh job).
+Cancelled/killed jobs are never auto-retried. `retryCount`, `maxRetries`, and
+`nextRetryAt` are exposed in `cortex_delegate_status` and the Jobs panel.
+Default: `maxRetries: 0` (disabled, P3 safe default) — enable via profile config patch.
 
 ## UI
 

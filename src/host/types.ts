@@ -181,6 +181,11 @@ export interface Job {
   finishedAt?: string
   exitCode?: number | null
   error?: string
+  /** Why the most recent attempt failed, kept ACROSS the retry backoff. `error`
+   * is deliberately cleared while a job sits in `queued`, so without this the
+   * only visible state during a 2/4/8s wait was "queued, exit —" with no
+   * reason. Cleared once an attempt finally succeeds. */
+  lastError?: string
   /** Auto-retry: how many times this job has been retried (0 = first attempt). */
   retryCount?: number
   /** Auto-retry: max retries allowed for this job (snapshotted from config at dispatch). */
@@ -216,6 +221,12 @@ export interface RunnerSpec {
   /** Seconds; `0` means "use `delegation.jobTimeoutSec`". */
   timeoutSec: number
   env: Record<string, string>
+  /**
+   * Absolute working directory for jobs of this runner; absent = the plugin
+   * state root. It comes from CONFIG ONLY — the caller's `workdir` argument is
+   * still refused — so task text can never redirect where a child executes.
+   */
+  cwd?: string
 }
 
 export interface DelegationConfig {

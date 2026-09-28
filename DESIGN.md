@@ -127,7 +127,15 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
 **Delegasi eksternal** (gerbang `delegation.enabled=false` default)
 - `cortex_delegate {runner, task, workdir?, images?, includeMemory?}` → spawn argv runner dari registry config; async; kembalikan jobId.
 - `cortex_delegate_status {jobId?}` / `cortex_delegate_logs {jobId, tailBytes?}`
+- `cortex_delegate_retry {jobId}` → re-dispatch manual (hanya job `dead-letter`/`failed`/`timeout`) sebagai job BARU; job lama tetap di disk sebagai bukti.
 - Saat selesai: `result.md` (output ter-cap) → auto: `cortex_log_append` (project+daily) + usulan memori + pesan room bila job ditautkan ke room. Write-back = jalur tool internal yang sama, tunduk pada pending queue.
+
+**Retry + Dead-Letter** (kunci `delegation.retry`, default `maxRetries: 0` = mati)
+- Hanya status `failed`/`timeout` yang auto-retry. `killed` (batal oleh manusia) tidak pernah di-retry — keputusan manusia final.
+- Backoff eksponensial: `delay(N) = min(baseDelayMs × 2^(N-1), maxDelayMs)`. Selama menunggu backoff job berstatus `queued` dan tetap memegang slot `maxConcurrent`.
+- State retry_write di `job.json` (`retryCount`/`maxRetries`/`nextRetryAt`), bukan hanya di memori: restart host DI TENGAH backoff membuat job `lost` (timer ikut mati bersama proses) — jujur, bukan dipurportur hidup.
+- Retry habis → status `dead-letter`: antrean tetap di disk, tampil di tab Jobs dengan badge merah + tombol Retry, dan bisa di-requeue manual.
+- `result.md` adalah artefak yang boleh dibaca manusia, jadi WAJIB konsisten dengan `job.json`: header, baris `attempt:`, dan blok `## auto-retry` / `## dead-letter` ditulis SESUDAH disposisi akhir diputuskan (bukti cacat: job `31e83e1407dc` live ter-dead-letter di `job.json` sementara `result.md` masih menulis `— failed` polos).
 
 **Pendukung**
 - `cortex_pending_list {}` / `cortex_pending_reject {id}`; approve utama lewat UI (the Cortex panel).

@@ -59,6 +59,10 @@ export interface DelegateView {
   finishedAt?: string
   exitCode?: number | null
   error?: string
+  /** Why the most recent attempt failed. Survives the `queued` backoff window,
+   * where `error` is cleared — so a polling caller sees the reason without
+   * catching the sub-millisecond `failed` transition. Cleared on success. */
+  lastError?: string
   cwd?: string
   roomId?: string
   sessionId?: string
@@ -90,6 +94,7 @@ export function viewOf(job: DelegateJob): DelegateView {
     ...(job.finishedAt !== undefined ? { finishedAt: job.finishedAt } : {}),
     ...(job.exitCode !== undefined ? { exitCode: job.exitCode } : {}),
     ...(job.error !== undefined ? { error: job.error } : {}),
+    ...(job.lastError !== undefined ? { lastError: job.lastError } : {}),
     ...(job.cwd !== undefined ? { cwd: job.cwd } : {}),
     ...(job.roomId !== undefined ? { roomId: job.roomId } : {}),
     ...(job.sessionId !== undefined ? { sessionId: job.sessionId } : {}),
