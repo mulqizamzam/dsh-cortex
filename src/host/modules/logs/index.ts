@@ -59,6 +59,12 @@ export function apply(deps: ModuleDeps): void {
     svc.dispose()
   }, 'dsh-cortex:logs service', deps.warn)
   svc.install()
+  // Retention at mount: a state root that was never written this process may
+  // still hold day files past `retention.dailyLogDays`. Fire-and-forget — the
+  // boot never waits on disk (same rule as the store scaffold).
+  void svc.prune('daily').catch((error: unknown) => {
+    deps.warn(`logs: mount prune failed: ${error instanceof Error ? error.message : String(error)}`)
+  })
   let refused = 0
   for (const definition of logTools(svc)) {
     const registered = registerToolSafe(deps.ctx, definition)

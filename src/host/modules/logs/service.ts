@@ -27,6 +27,9 @@ export const READ_LINE_CHARS = 400
 /** Lines returned by one read; the panel pages, the model gets a bounded tail. */
 export const READ_MAX_LINES = 80
 
+/** Quiet period after a write before the retention sweep runs. */
+export const PRUNE_THROTTLE_MS = 5_000
+
 /** One day of a log, as `/dsh-cortex-read` answers it. */
 export interface LogDayRow {
   date: string
@@ -90,6 +93,8 @@ export class LogService {
   private readonly clock: () => Date
   private disposers: Array<() => void> = []
   private seamInstalled = false
+  /** Pending throttled retention sweep, cleared on teardown. */
+  private pruneTimer: ReturnType<typeof setTimeout> | undefined
 
   constructor(options: LogServiceOptions) {
     this.deps = options.deps
@@ -148,10 +153,44 @@ export class LogService {
       const cwd = cwdOf(agent)
       await this.store.ensureProject(pid, { ...(cwd === undefined ? {} : { cwd }) })
     }
+    // Retention (`retention.dailyLogDays`): the window that used to be a dead
+    // config key, now the only thing bounding a log directory. Best-effort —
+    // a prune that fails costs disk, never the line just written (P4).
+    this.schedulePrune(scope, pid)
     // Recording a line settles the review debt for this session (G-06).
     this.nudge.noteLogged(sessionIdOf(agent) ?? '')
     const rolled = result.data.rolled === true ? ' (day file was full; continued in the next part)' : ''
     return { ok: true, message: `logged to ${scope} ${result.data.date}${rolled}`, ref: result.data }
+  }
+
+  /**
+   * Prune one log directory to `retention.dailyLogDays`, off the write path.
+   *
+   * Fire-and-forget with the throttle below: a busy log would otherwise pay a
+   * directory listing per appended line, and the window only moves once a day.
+   * The timer is unref'd so a pending prune never holds the process open.
+   */
+  private schedulePrune(scope: 'project' | 'daily', pid?: string): void {
+    if (this.pruneTimer !== undefined) return
+    this.pruneTimer = setTimeout(() => {
+      this.pruneTimer = undefined
+      void this.prune(scope, pid)
+    }, PRUNE_THROTTLE_MS)
+    this.pruneTimer.unref?.()
+  }
+
+  /** Awaitable prune (mount, tests, shutdown). Never throws. */
+  async prune(scope: 'project' | 'daily' = 'daily', pid?: string): Promise<number> {
+    const days = this.config().retention.dailyLogDays
+    const result = await this.store.pruneLogs({ days, scope, ...(scope === 'project' && pid !== undefined ? { pid } : {}) })
+    if (!result.ok) {
+      this.deps.warn(`logs: prune (${scope}) failed: ${result.error}`)
+      return 0
+    }
+    if (result.data.removed.length > 0) {
+      this.deps.log(`logs: pruned ${String(result.data.removed.length)} log file(s) outside the ${String(days)}-day window`)
+    }
+    return result.data.removed.length
   }
 
   // ----------------------------------------------------------------- read ----
@@ -263,6 +302,10 @@ export class LogService {
   }
 
   dispose(): void {
+    if (this.pruneTimer !== undefined) {
+      clearTimeout(this.pruneTimer)
+      this.pruneTimer = undefined
+    }
     for (const disposer of this.disposers.splice(0)) {
       try {
         disposer()

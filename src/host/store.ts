@@ -6,11 +6,11 @@ import { neutralize } from '../lib/sanitize.ts'
  * template pairs at render time even if a module forgets to sanitize. */
 const clampText = (input: string, max: number): string => rawClampText(neutralize(input), max)
 import type { CortexCaps } from '../lib/caps.ts'
-import { attempt } from '../lib/errors.ts'
+import { attempt, errorMessage } from '../lib/errors.ts'
 import type { CortexResult } from '../lib/errors.ts'
 import { branchMatches } from '../lib/gitx.ts'
 import { ensureDir, ensureStateRoot } from '../lib/home.ts'
-import { appendMdCapped, dirBytes, listDir, readJsonSafe, readTextSafe, sizeOf, writeJsonAtomic, writeTextAtomic } from '../lib/fsx.ts'
+import { appendMdCapped, dirBytes, listDir, listNames, readJsonSafe, readTextSafe, sizeOf, writeJsonAtomic, writeTextAtomic } from '../lib/fsx.ts'
 import type { WarnFn } from '../lib/fsx.ts'
 import { isoDate, isSafeKey, newId, shiftDate } from '../lib/ids.ts'
 import type {
@@ -495,21 +495,81 @@ export class CortexStore {
   logRead(input: { scope: 'project' | 'daily'; pid?: string; date?: string; lastDays?: number }): Promise<CortexResult<{ date: string; days: string[]; text: string }>> {
     return this.run('logRead', async () => {
       const base = input.date ?? this.today()
+      const window = Math.max(1, Math.min(input.lastDays ?? 1, 90))
       const days: string[] = []
       const parts: string[] = []
-      for (let index = 0; index < Math.max(1, Math.min(input.lastDays ?? 1, 90)); index += 1) {
+      if (input.scope === 'project' && input.pid === undefined) {
+        // No project scope: the day names still come back (a caller shows which
+        // days it asked for), exactly as the per-day `continue` used to.
+        for (let index = 0; index < window; index += 1) days.push(shiftDate(base, -index))
+        return { date: base, days, text: '' }
+      }
+      // ONE uncapped listing per read, indexed by the date each FILE NAME
+      // carries. The previous shape re-listed the same directory once per day
+      // through the capped `listDir`, so a log directory holding more than the
+      // cap answered the NEWEST days with nothing at all while their files sat
+      // on disk. The predicate stays deliberately loose (`<day>….md`, so a
+      // hand-made `2026-03-04-huge.md` still reads as that day, as before);
+      // `pruneLogs` is the stricter side of this pair because deleting is
+      // narrower than reading.
+      const dir = input.scope === 'project'
+        ? join(this.paths.projectLog(input.pid as string, base), '..')
+        : join(this.paths.dailyLog(base), '..')
+      const byDay = new Map<string, string[]>()
+      for (const name of await listNames(dir)) {
+        if (!name.endsWith('.md')) continue
+        const match = /^(\d{4}-\d{2}-\d{2})/.exec(name)
+        if (match === null) continue
+        const day = match[1] as string
+        const bucket = byDay.get(day)
+        if (bucket === undefined) byDay.set(day, [name])
+        else bucket.push(name)
+      }
+      for (let index = 0; index < window; index += 1) {
         const day = shiftDate(base, -index)
         days.push(day)
-        if (input.scope === 'project' && !input.pid) continue
-        const dir = join(input.scope === 'project' ? this.paths.projectLog(input.pid as string, day) : this.paths.dailyLog(day), '..')
-        const { names } = await listDir(dir, 40)
-        for (const name of names.filter(entry => entry.startsWith(day) && entry.endsWith('.md'))) {
+        for (const name of byDay.get(day) ?? []) {
           const text = await readTextSafe(join(dir, name), this.warn)
           if (text) parts.push(`### ${day} (${name})\n${text.trimEnd()}`)
         }
       }
       const joined = parts.join('\n\n')
       return { date: base, days, text: joined.length > this.caps.searchResultChars ? `${joined.slice(0, this.caps.searchResultChars)}\n[… truncated]` : joined }
+    })
+  }
+
+  /**
+   * Retention (`retention.dailyLogDays`): drop day files whose date is older
+   * than the window, rollover parts included. Idempotent (a second call removes
+   * nothing), never throws, and leaves any file it does not recognise as a
+   * date-named log part untouched. Goes through the write gate, so a state
+   * root this build must not touch is never pruned.
+   */
+  pruneLogs(input: { days: number; scope: 'daily' | 'project'; pid?: string }): Promise<CortexResult<{ removed: string[] }>> {
+    return this.write('pruneLogs', async () => {
+      if (input.scope === 'project' && input.pid === undefined) throw new Error('project logs need a project id')
+      // A window below one day means "retention off" (the same `0 = off`
+      // reading `logReview.everyTurns` uses), never "delete everything".
+      if (!Number.isFinite(input.days) || input.days < 1) return { removed: [] }
+      const days = Math.min(Math.floor(input.days), 3650)
+      // Keep the newest `days` day files, today included.
+      const cutoff = shiftDate(this.today(), -(days - 1))
+      const dir = input.scope === 'project' ? join(this.paths.project(input.pid as string), 'log') : join(this.root, 'daily')
+      const { rm } = await import('node:fs/promises')
+      const removed: string[] = []
+      for (const name of await listNames(dir)) {
+        const match = /^(\d{4}-\d{2}-\d{2})(?:-\d+)?\.md$/.exec(name)
+        if (match === null) continue
+        if ((match[1] as string) >= cutoff) continue
+        const file = join(dir, name)
+        try {
+          await rm(file, { force: true })
+          removed.push(file)
+        } catch (error) {
+          this.warn(`pruneLogs: could not remove ${name}: ${errorMessage(error)}`)
+        }
+      }
+      return { removed }
     })
   }
 
@@ -782,18 +842,31 @@ export class CortexStore {
   readMessages(roomId: string, options: { sinceSeq?: number; limit?: number } = {}): Promise<CortexResult<RoomMessage[]>> {
     return this.run('readMessages', async () => {
       const dir = this.paths.roomMessages(roomId)
-      const { names } = await listDir(dir, LIST_CAP)
-      const messages: RoomMessage[] = []
-      for (const name of names) {
+      // The seq lives in the FILE NAME (`000123.json`), so the page is chosen
+      // from the names and only those files are opened. The previous shape took
+      // the oldest LIST_CAP names, read and parsed every one of them, and only
+      // THEN applied `sinceSeq`: past 500 messages the newest rows were
+      // unreachable and a `sinceSeq` above the page answered with nothing.
+      // Numerically sorted, because zero-padding is not enough past 999999
+      // (`1000000` sorts before `0999999` as text).
+      const rows: { seq: number; name: string }[] = []
+      for (const name of await listNames(dir)) {
         if (!name.endsWith('.json')) continue
-        const message = await this.read<RoomMessage | null>(join(dir, name), null)
+        const seq = Number.parseInt(name.slice(0, -'.json'.length), 10)
+        if (!Number.isFinite(seq)) continue
+        if (options.sinceSeq !== undefined && seq <= options.sinceSeq) continue
+        rows.push({ seq, name })
+      }
+      rows.sort((a, b) => a.seq - b.seq)
+      const limit = options.limit ?? 50
+      const page = rows.slice(Math.max(0, rows.length - limit))
+      const messages: RoomMessage[] = []
+      for (const row of page) {
+        const message = await this.read<RoomMessage | null>(join(dir, row.name), null)
         if (!message || typeof message.seq !== 'number') continue
-        if (options.sinceSeq !== undefined && message.seq <= options.sinceSeq) continue
         messages.push(message)
       }
-      const sorted = messages.sort((a, b) => a.seq - b.seq)
-      const limit = options.limit ?? 50
-      return sorted.length > limit ? sorted.slice(sorted.length - limit) : sorted
+      return messages.sort((a, b) => a.seq - b.seq)
     })
   }
 
