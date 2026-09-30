@@ -460,14 +460,42 @@ export class DelegateService {
     // Terminal status FIRST: job.json must be authoritative before any
     // side-effecting write-back runs, so a crash mid-write-back can never
     // leave a 'running' corpse behind a completed job.
-    await this.patch(job.id, {
-      status: terminalStatus as JobStatus,
-      exitCode: outcome.exitCode,
-      finishedAt,
-      ...(outcome.error !== undefined ? { error: outcome.error } : {}),
-      // A success clears the stale failure reason; anything else records it.
-      ...(status === 'succeeded' ? { lastError: undefined } : { lastError: failureReason }),
-    })
+    //
+    // A job that WILL retry must not pass through a terminal status at all, and
+    // must be recorded as queued exactly ONCE: the single write below is both
+    // the backoff marker and the closing of that terminal-status window. The
+    // old shape wrote `failed` here and corrected it to `queued` in a second
+    // patch two awaits later, which left a real window in which job.json
+    // claimed a terminal outcome for a job about to run again — observers saw
+    // a spurious `failed`, and the retry-chain poll stopped on it and missed an
+    // attempt. `queued` is a live status, so the anti-corpse guarantee holds.
+    if (willRetry) {
+      const nextCount = retryCount + 1
+      const delay = this.retryDelayMs(nextCount)
+      await this.patch(job.id, {
+        status: asJobStatus('queued'),
+        retryCount: nextCount,
+        nextRetryAt: new Date(Date.now() + delay).toISOString(),
+        // Keep the row visible and holding a concurrency slot during the
+        // backoff window. sweepOrphans at boot marks it lost if the host
+        // restarts mid-backoff (honest: the timer died with the host).
+        startedAt: new Date().toISOString(),
+        finishedAt: undefined,
+        exitCode: undefined,
+        error: undefined,
+        // The only place the reason is visible during the backoff wait.
+        lastError: failureReason,
+      })
+    } else {
+      await this.patch(job.id, {
+        status: terminalStatus as JobStatus,
+        exitCode: outcome.exitCode,
+        finishedAt,
+        ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+        // A success clears the stale failure reason; anything else records it.
+        ...(status === 'succeeded' ? { lastError: undefined } : { lastError: failureReason }),
+      })
+    }
 
     if (status === 'succeeded') {
       const notes = await this.writeBack({ ...job, finishedAt, exitCode: outcome.exitCode }, summary)
@@ -484,25 +512,11 @@ export class DelegateService {
     }
 
     // --- auto-retry + dead-letter scheduling ---
+    // The queued write for a scheduled retry already landed above; here we only
+    // arm the timer and say so.
     if (willRetry) {
       const nextCount = retryCount + 1
       const delay = this.retryDelayMs(nextCount)
-      const nextRetryAt = new Date(Date.now() + delay).toISOString()
-      await this.patch(job.id, {
-        retryCount: nextCount,
-        nextRetryAt,
-        // Keep status as queued so the job stays visible and occupies a concurrency slot
-        // during the backoff window. sweepOrphans at boot will mark it lost if the
-        // host restarts during backoff (honest: the timer died with the host).
-        status: asJobStatus('queued'),
-        startedAt: new Date().toISOString(),
-        finishedAt: undefined,
-        exitCode: undefined,
-        error: undefined,
-        // `error` is cleared above, so re-assert the reason here: this is the
-        // only place it is visible during the backoff wait.
-        lastError: failureReason,
-      })
       this.deps.log(`delegate: job ${job.id} retry ${nextCount}/${String(maxRetries)} scheduled in ${String(delay)}ms`)
       this.scheduleRetry(job.id, delay)
     } else if (willDeadLetter) {

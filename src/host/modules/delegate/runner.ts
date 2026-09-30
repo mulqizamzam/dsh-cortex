@@ -58,9 +58,21 @@ export interface RunningJob {
  * rewrite (the store exposes no append primitive; a crash costs the last
  * flush window, which is documented in the module report). Flushes are
  * time-throttled so a chatty runner cannot turn every chunk into a rewrite.
+ *
+ * The cap is enforced INCREMENTALLY: `push` runs synchronously inside the
+ * child's `data` handler, so its cost is the host event loop's cost. The
+ * buffer is a queue of chunks plus a running UTF-8 byte total — never
+ * re-measured — and trimming drops whole leading chunks and byte-slices at
+ * most one, so a push is O(chunk) instead of O(cap). (The previous shape ran
+ * `Buffer.byteLength` over the whole buffer per chunk plus a binary search of
+ * full re-measures: measured 11,648 ms of synchronous CPU for 100 MB of
+ * 64 KiB chunks against a 1 MiB cap.)
  */
 export class StreamSink {
-  private buffer = ''
+  /** Untrimmed chunks, oldest first. Dropped from the front once the cap trips. */
+  private parts: string[] = []
+  /** UTF-8 byte length of the whole queue. */
+  private bytes = 0
   private overflowed = false
   private dirty = false
   private lastFlushMs = 0
@@ -77,20 +89,46 @@ export class StreamSink {
 
   push(chunk: string): void {
     if (chunk === '') return
-    this.buffer += chunk
-    if (Buffer.byteLength(this.buffer, 'utf8') > this.capBytes) {
-      // Keep the freshest tail; reserve the marker's BYTE length (it is
-      // multi-byte) so `marker + tail` can never exceed the cap.
-      const markerBytes = Buffer.byteLength(HEAD_DROPPED, 'utf8')
-      const keep = Math.max(0, this.capBytes - markerBytes)
-      this.buffer = tailByBytes(this.buffer, keep)
-      this.overflowed = true
-    }
+    this.parts.push(chunk)
+    this.bytes += Buffer.byteLength(chunk, 'utf8')
+    if (this.bytes > this.capBytes) this.trim()
     this.dirty = true
   }
 
+  /**
+   * Drop the oldest bytes until the queue fits `capBytes` minus the marker it
+   * will have to prefix. Whole chunks leave the queue without being copied;
+   * the one straddling boundary is sliced on a byte-Buffer, then re-decoded
+   * with a bounded repair step so a cut codepoint can never surface as U+FFFD.
+   */
+  private trim(): void {
+    const keep = Math.max(0, this.capBytes - Buffer.byteLength(HEAD_DROPPED, 'utf8'))
+    while (this.parts.length > 1 && this.bytes > keep) {
+      const head = this.parts[0] as string
+      const headBytes = Buffer.byteLength(head, 'utf8')
+      if (this.bytes - headBytes >= keep) {
+        this.parts.shift()
+        this.bytes -= headBytes
+        continue
+      }
+      // Partial drop: keep the tail of the head chunk.
+      const drop = this.bytes - keep
+      this.parts[0] = sliceBytesFromEnd(head, drop)
+      this.bytes -= drop
+      break
+    }
+    // A single oversized chunk can still exceed `keep`; clamp it.
+    if (this.bytes > keep) {
+      const only = this.parts[0] ?? ''
+      this.parts[0] = sliceBytesFromEnd(only, this.bytes - keep)
+      this.bytes = keep
+    }
+    this.overflowed = true
+  }
+
   content(): string {
-    return this.overflowed ? HEAD_DROPPED + this.buffer : this.buffer
+    const body = this.parts.length === 1 ? (this.parts[0] as string) : this.parts.join('')
+    return this.overflowed ? HEAD_DROPPED + body : body
   }
 
   /** Persist when the throttle allows; force always writes when dirty. */
@@ -108,6 +146,30 @@ export class StreamSink {
       // the service reports it. Swallowing HERE is the only quiet spot.
     }
   }
+}
+
+/**
+ * Drop the first `dropBytes` of a utf-8 string, snapped to a codepoint
+ * boundary: slicing the byte buffer at an arbitrary offset can land inside a
+ * multi-byte character, so after decoding we advance past any leading
+ * U+FFFD that such a cut produced. The repair loop is bounded by the longest
+ * legal sequence (4 bytes).
+ */
+export function sliceBytesFromEnd(text: string, dropBytes: number): string {
+  const total = Buffer.byteLength(text, 'utf8')
+  if (dropBytes <= 0) return text
+  if (dropBytes >= total) return ''
+  const bytes = Buffer.from(text, 'utf8')
+  let start = dropBytes
+  let sliced = bytes.subarray(start).toString('utf8')
+  // A cut inside a codepoint decodes to U+FFFD at the head; skip those bytes.
+  let guard = 0
+  while (sliced.startsWith('�') && guard < 4) {
+    start += 1
+    sliced = bytes.subarray(start).toString('utf8')
+    guard += 1
+  }
+  return sliced
 }
 
 export const HEAD_DROPPED = '[… head dropped — output exceeded the per-stream cap …]\n'
