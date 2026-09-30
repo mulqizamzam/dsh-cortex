@@ -89,11 +89,15 @@ export class DecisionService {
   get store() { return this.deps.store }
 
   /**
-   * Memory entries that look like they are about this decision. Best-effort:
-   * every failure path returns no links, because a decision record is more
-   * valuable than its back-references.
+   * Memory entries that a decision could link to, read ONCE per index run.
+   *
+   * This used to be `findRelatedEntries`, which listed the same entries again
+   * for EVERY decision: indexing 40 decisions cost 80 listings, each re-reading
+   * every entry file, for links that cannot differ between them — the loop
+   * writes decisions, never entries. Best-effort: any failure yields no pool,
+   * so no links.
    */
-  private async findRelatedEntries(decision: Decision, pid?: string): Promise<string[]> {
+  private async loadLinkPool(pid?: string): Promise<Entry[]> {
     try {
       const scopes: Array<{ track: Track; pid?: string }> = [{ track: 'user' }, { track: 'global' }]
       if (pid !== undefined) scopes.push({ track: 'project', pid })
@@ -102,9 +106,20 @@ export class DecisionService {
         const result = await this.store.listEntries({ track: scope.track, ...(scope.pid === undefined ? {} : { pid: scope.pid }) })
         if (result.ok) entries.push(...result.data.entries)
       }
+      return entries
+    } catch {
+      return []
+    }
+  }
+
+  /** Entry ids this decision matches, against an already-read pool. */
+  private relatedEntries(decision: Decision, entries: readonly Entry[]): string[] {
+    try {
       if (entries.length === 0) return []
       const query = `${decision.context} ${decision.chosen}`.trim()
       if (query === '') return []
+      // `searchEntries` never mutates the array it is handed, so one pool is
+      // safe to share across every decision of the run.
       const found = searchEntries({ entries, query, limit: LINK_LIMIT })
       return found.hits.map(hit => hit.id).slice(0, LINK_LIMIT)
     } catch {
@@ -137,6 +152,8 @@ export class DecisionService {
     let skipped = 0
     let linked = 0
     const errors: string[] = []
+    // One listing for the whole run; `linkMemories: false` lists nothing at all.
+    const linkPool = args.linkMemories === false ? [] : await this.loadLinkPool(args.pid)
     for (const raw of lines) {
       const parsed = parseDecisionLine(raw)
       if (!parsed.ok) { errors.push(parsed.error ?? 'unknown'); continue }
@@ -145,7 +162,7 @@ export class DecisionService {
       // A line that named its own author wins; the calling session only fills
       // the gap, because the indexer is often NOT the session that decided.
       const owner = base.owner !== '' ? base.owner : (args.owner ?? 'user')
-      const related = args.linkMemories === false ? [] : await this.findRelatedEntries(base, args.pid)
+      const related = this.relatedEntries(base, linkPool)
       const decision: Decision = {
         ...base,
         owner,
