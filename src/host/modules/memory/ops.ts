@@ -492,14 +492,16 @@ export async function deleteEntry(
   if (isFail(id)) return id
   if (!isSafeKey(String(id.value))) return fail('id must be an entry id (12 hex chars)', 'bad-id')
   const scope = await projectForCall(context, asRecord(args))
-  const listing = await context.store.listEntries({ ...(scope.pid !== undefined ? { pid: scope.pid } : {}), archived: true, limit: LIST_CAP })
-  const active = await context.store.listEntries({ ...(scope.pid !== undefined ? { pid: scope.pid } : {}), limit: LIST_CAP })
-  if (!listing.ok && !active.ok) return fail(listing.error, 'read-failed')
-  const found = [...(active.ok ? active.data.entries : []), ...(listing.ok ? listing.data.entries : [])].find(entry => entry.id === id.value)
   const key = `delete:${String(id.value)}`
   const confirm = typeof args.confirm === 'string' ? args.confirm.trim() : ''
   if (confirm === '') {
-    // First step: hand back a single-use token; delete nothing yet.
+    // First step: name the entry, then hand back a single-use token. The two
+    // listings exist ONLY to write that warning — the confirm step deletes by
+    // id and never looked at them, so it does not pay for them (H3).
+    const listing = await context.store.listEntries({ ...(scope.pid !== undefined ? { pid: scope.pid } : {}), archived: true, limit: LIST_CAP })
+    const active = await context.store.listEntries({ ...(scope.pid !== undefined ? { pid: scope.pid } : {}), limit: LIST_CAP })
+    if (!listing.ok && !active.ok) return fail(listing.error, 'read-failed')
+    const found = [...(active.ok ? active.data.entries : []), ...(listing.ok ? listing.data.entries : [])].find(entry => entry.id === id.value)
     const token = tokens.issue(key)
     const warning = found === undefined
       ? `Nothing matched id ${id.value}, so this call can delete nothing. It returned the token ${token} only so the two-step shape stays uniform; re-run with confirm to see the not-found error.`

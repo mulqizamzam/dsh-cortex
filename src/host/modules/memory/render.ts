@@ -58,16 +58,22 @@ function emptyTracks(): TrackLoad {
  */
 export async function loadTracks(store: CortexStore, scope: { pid?: string; branch: string | null }): Promise<TrackLoad> {
   const tracks: TrackLoad = { ...emptyTracks(), branch: scope.branch, ...(scope.pid ? { pid: scope.pid } : {}) }
-  for (const track of RENDER_TRACKS) {
-    if (track === 'project' && !scope.pid) continue
-    const result = await store.listEntries({ track, ...(track === 'project' ? { pid: scope.pid } : {}), branch: scope.branch })
-    if (!result.ok) {
+  // The tracks are three independent directories, so read them together
+  // instead of one after another. The results are applied in track order, so
+  // which error lands in `error` does not depend on who finished first.
+  const reads = await Promise.all(RENDER_TRACKS.map(async track => {
+    if (track === 'project' && !scope.pid) return undefined
+    return { track, result: await store.listEntries({ track, ...(track === 'project' ? { pid: scope.pid } : {}), branch: scope.branch }) }
+  }))
+  for (const read of reads) {
+    if (read === undefined) continue
+    if (!read.result.ok) {
       // One unreadable track must not cost the model the other two (P4).
-      tracks.error = result.error
+      tracks.error = read.result.error
       continue
     }
-    tracks[track] = result.data.entries
-    tracks.truncated = tracks.truncated || result.data.truncated
+    tracks[read.track] = read.result.data.entries
+    tracks.truncated = tracks.truncated || read.result.data.truncated
   }
   return tracks
 }
@@ -100,9 +106,15 @@ interface Section {
   omitted: number
 }
 
+/** One encoder for the module: a fresh one was allocated per call before. */
+const encoder = new TextEncoder()
+
 function bytesOf(text: string): number {
-  return new TextEncoder().encode(text).length
+  return encoder.encode(text).length
 }
+
+/** What a fully empty block says, so the accounting has one source for it. */
+const EMPTY_BODY = '(no memories stored yet)'
 
 function entryLine(entry: Entry): string {
   const bits = [`i${entry.importance}`]
@@ -126,17 +138,36 @@ function omissionLine(count: number): string {
 /**
  * Keep whole lines while they fit `budget` — the note line counts against the
  * budget too — so the result is always `<= budget` (P2).
+ *
+ * Same answer as a linear scan from the tail, in O(log n) instead: the joined
+ * length of the first k lines plus the omission note is
+ * `prefix[k] + noteLength`, and that grows monotonically with k (every line adds
+ * at least one char, and the note never grows as the omitted count shrinks), so
+ * the largest fitting k is a binary search. `prefix[k]` is measured once.
  */
 export function fitLines(lines: readonly string[], budget: number): { kept: string[]; omitted: number } {
-  if (lines.length === 0) return { kept: [], omitted: 0 }
-  if (budget <= 0) return { kept: [], omitted: lines.length }
-  if (lines.join('\n').length <= budget) return { kept: [...lines], omitted: 0 }
-  for (let count = lines.length - 1; count >= 0; count -= 1) {
-    const kept = lines.slice(0, count)
-    if ([...kept, omissionLine(lines.length - count)].join('\n').length <= budget) return { kept, omitted: lines.length - count }
+  const count = lines.length
+  if (count === 0) return { kept: [], omitted: 0 }
+  if (budget <= 0) return { kept: [], omitted: count }
+  const prefix = new Float64Array(count + 1)
+  for (let index = 0; index < count; index += 1) prefix[index + 1] = (prefix[index] ?? 0) + (lines[index]?.length ?? 0) + 1
+  // prefix[k] - 1 is the length of the first k lines joined; nothing omitted.
+  if ((prefix[count] ?? 0) - 1 <= budget) return { kept: [...lines], omitted: 0 }
+  const fits = (kept: number): boolean => (prefix[kept] ?? 0) + omissionLine(count - kept).length <= budget
+  let low = 0
+  let high = count - 1
+  let best = -1
+  while (low <= high) {
+    const middle = (low + high) >> 1
+    if (fits(middle)) {
+      best = middle
+      low = middle + 1
+    } else {
+      high = middle - 1
+    }
   }
-  // Not even the note alone fits: keep nothing. The budget is the law.
-  return { kept: [], omitted: lines.length }
+  if (best < 0) return { kept: [], omitted: count }
+  return { kept: lines.slice(0, best), omitted: count - best }
 }
 
 /** Pure assembly: deterministic for a given (config, tracks) pair. */
@@ -175,48 +206,99 @@ export function assembleBlock(input: AssembleInput): AssembleResult {
     notices.push(`[…] a track listing hit the ${input.listCap}-entry read cap, so more entries exist than were read — narrow with cortex_memory_search`)
   }
 
-  /** One canonical body; everything (including the header counts) reads this. */
-  const compose = (): { body: string; included: number; omitted: number } => {
-    const parts: string[] = [...notices]
+  /**
+   * Sizes are tracked as Σ(len(part) + 1) instead of by re-joining the body:
+   * the body is then `parts - 1` characters and `bytes - 1` bytes, and dropping
+   * one line costs that line, not the whole block. The previous shape rebuilt
+   * (and re-encoded, for the header) the entire block once per dropped line,
+   * which is what made a 1500-entry ceiling trim cost ~180 ms.
+   */
+  let parts = 0
+  let partChars = 0
+  let partBytes = 0
+  const addPart = (text: string): void => {
+    parts += 1
+    partChars += text.length + 1
+    partBytes += bytesOf(text) + 1
+  }
+  const dropPart = (text: string): void => {
+    parts -= 1
+    partChars -= text.length + 1
+    partBytes -= bytesOf(text) + 1
+  }
+  for (const notice of notices) addPart(notice)
+  for (const section of sections) {
+    if (section.kept.length === 0 && section.omitted === 0) continue
+    addPart(section.title)
+    for (const line of section.kept) addPart(line)
+    if (section.omitted > 0) addPart(omissionLine(section.omitted))
+  }
+
+  const counts = (): { included: number; omitted: number } => {
     let included = 0
     let omitted = 0
     for (const section of sections) {
       included += section.kept.length
       omitted += section.omitted
-      if (section.kept.length === 0 && section.omitted === 0) continue
-      parts.push(section.title)
-      parts.push(...section.kept)
-      if (section.omitted > 0) parts.push(omissionLine(section.omitted))
     }
-    return { body: parts.length === 0 ? '(no memories stored yet)' : parts.join('\n'), included, omitted }
+    return { included, omitted }
   }
-
-  const build = (): { text: string; included: number; omitted: number } => {
-    const composed = compose()
-    // `M bytes` is the cost of the memory body itself; the header, label and
-    // footer are fixed framing and counted in `AssembleResult.bytes`.
-    const header = memoryHeader(composed.included, bytesOf(composed.body))
-    return { text: [label, header, composed.body, INJECT_FOOTER].join('\n'), included: composed.included, omitted: composed.omitted }
+  const bodyOf = (): { text: string; bytes: number } => (parts === 0
+    ? { text: EMPTY_BODY, bytes: bytesOf(EMPTY_BODY) }
+    : { text: '', bytes: partBytes - 1 })
+  /** Length of the block this state would build — the ceiling compares this. */
+  const blockLength = (): number => {
+    const body = bodyOf()
+    const { included } = counts()
+    return label.length + memoryHeader(included, body.bytes).length + (body.text === '' ? partChars - 1 : body.text.length) + INJECT_FOOTER.length + 3
   }
 
   // Total ceiling: drop the tail line of the lowest-priority non-empty section
   // until the whole block fits. Each pass removes one real line, so it ends.
   const ceiling = Math.max(0, Math.floor(caps.totalInjectChars))
-  let current = build()
-  for (let guard = 0; current.text.length > ceiling && guard < 10000; guard += 1) {
-    const donor = [...sections].reverse().find(section => section.kept.length > 0)
+  for (let guard = 0; blockLength() > ceiling && guard < 10000; guard += 1) {
+    let donor: Section | undefined
+    for (let index = sections.length - 1; index >= 0; index -= 1) {
+      const candidate = sections[index]
+      if (candidate !== undefined && candidate.kept.length > 0) {
+        donor = candidate
+        break
+      }
+    }
     if (donor === undefined) break
-    donor.kept.pop()
+    if (donor.omitted > 0) dropPart(omissionLine(donor.omitted))
+    const dropped = donor.kept.pop()
+    if (dropped === undefined) break
+    dropPart(dropped)
     donor.omitted += 1
-    current = build()
+    addPart(omissionLine(donor.omitted))
   }
-  let block = current.text
+
+  /** One canonical body, built once: everything above only kept its sizes. */
+  const bodyParts: string[] = [...notices]
+  for (const section of sections) {
+    if (section.kept.length === 0 && section.omitted === 0) continue
+    bodyParts.push(section.title)
+    bodyParts.push(...section.kept)
+    if (section.omitted > 0) bodyParts.push(omissionLine(section.omitted))
+  }
+  const body = bodyParts.length === 0 ? EMPTY_BODY : bodyParts.join('\n')
+  const final = counts()
+  const text = [
+    label,
+    // `M bytes` is the cost of the memory body itself; the header, label and
+    // footer are fixed framing and counted in `AssembleResult.bytes`.
+    memoryHeader(final.included, bytesOf(body)),
+    body,
+    INJECT_FOOTER,
+  ].join('\n')
+  let block = text
   if (block.length > ceiling) block = ceiling <= 1 ? '' : `${block.slice(0, ceiling - 1)}…`
   return {
     block,
-    included: current.included,
-    omitted: current.omitted,
-    truncated: tracks.truncated || current.omitted > 0,
+    included: final.included,
+    omitted: final.omitted,
+    truncated: tracks.truncated || final.omitted > 0,
     bytes: bytesOf(block),
   }
 }

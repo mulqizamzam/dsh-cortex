@@ -679,15 +679,34 @@ export class RoomService {
     for (const mail of [...mails].reverse()) this.enqueue(sessionId, mail, 'front')
   }
 
-  /** Unread count per member, for honest `cortex_room_status` output. */
+  /**
+   * Unread count per member, for honest `cortex_room_status` output.
+   *
+   * ONE listing answers for every member: each member's own page was "the newest
+   * QUEUE_MAX * 2 messages after my watermark", and that set is always a subset
+   * of "the newest QUEUE_MAX * 2 messages after the LOWEST watermark" — so read
+   * that page once and filter it per member. The old shape listed the room once
+   * per member (N directory walks, N sets of file reads) for the same numbers.
+   */
   async unreadCounts(room: Room): Promise<Record<string, number>> {
     const out: Record<string, number> = {}
-    for (const member of this.membersOf(room)) {
+    const members = this.membersOf(room)
+    const sinceBySession = new Map<string, number>()
+    let lowest = Number.POSITIVE_INFINITY
+    for (const member of members) {
       const sessionId = member.sessionId as string
       const since = await this.readConsumed(sessionId, room.id)
-      const result = await this.deps.store.readMessages(room.id, { sinceSeq: since, limit: QUEUE_MAX * 2 })
-      const list = result.ok && result.data !== undefined ? result.data : []
-      out[sessionId] = list.filter(message => message.fromSessionId !== sessionId).length
+      sinceBySession.set(sessionId, since)
+      if (since < lowest) lowest = since
+    }
+    if (members.length === 0) return out
+    const result = await this.deps.store.readMessages(room.id, {
+      sinceSeq: Number.isFinite(lowest) ? lowest : 0,
+      limit: QUEUE_MAX * 2,
+    })
+    const list = result.ok && result.data !== undefined ? result.data : []
+    for (const [sessionId, since] of sinceBySession) {
+      out[sessionId] = list.filter(message => message.seq > since && message.fromSessionId !== sessionId).length
     }
     return out
   }
