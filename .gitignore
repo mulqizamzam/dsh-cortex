@@ -1,5 +1,9 @@
 node_modules/
-lib/
+# Build output at the ROOT only. The unanchored `lib/` also matched
+# `src/lib/`, so all eight shared source modules (caps, errors, fsx, gitx,
+# home, ids, pid, sanitize) were untracked while src/host imports them —
+# HEAD could not build from a fresh clone. Anchor it; `src/lib/` is source.
+/lib/
 .pnpm-store/
 .pnpm-cache/
 *.tsbuildinfo
