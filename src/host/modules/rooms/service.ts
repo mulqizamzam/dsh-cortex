@@ -220,27 +220,31 @@ export class RoomService {
    * Stamp the author's member row with the moment it spoke, so `rooms.list`
    * `lastSeen` and `cortex_room_status` `lastActivityAt` mean something.
    * Best-effort: a failed stamp never fails the post (P4).
+   * Serialized per-room to avoid concurrent posts clobbering each other's
+   * member timestamps (L5).
    */
   private async touchMember(room: Room, sessionId: string | undefined): Promise<void> {
     if (sessionId === undefined) return
-    const at = new Date().toISOString()
-    try {
-      // Re-read: the post advanced `lastSeq` on disk after our snapshot, and a
-      // whole-file rewrite of a stale room would roll that back.
-      const fresh = await this.get(room.id)
-      if (fresh === undefined) return
-      let changed = false
-      const members = fresh.members.map(member => {
-        if (member.sessionId !== sessionId) return member
-        changed = true
-        return { ...member, lastActivityAt: at, state: this.stateOf(member) }
-      })
-      if (!changed) return
-      const stamped = await this.deps.store.writeStateJson(this.deps.store.paths.roomDoc(fresh.id), { ...fresh, members })
-      if (!stamped.ok) throw new Error(stamped.error)
-    } catch (error) {
-      this.warn(`member stamp failed for ${room.id}/${sessionId}: ${errorMessage(error)}`)
-    }
+    await this.deps.store.serializePerRoom(room.id, async () => {
+      const at = new Date().toISOString()
+      try {
+        // Re-read: the post advanced `lastSeq` on disk after our snapshot, and a
+        // whole-file rewrite of a stale room would roll that back.
+        const fresh = await this.get(room.id)
+        if (fresh === undefined) return
+        let changed = false
+        const members = fresh.members.map(member => {
+          if (member.sessionId !== sessionId) return member
+          changed = true
+          return { ...member, lastActivityAt: at, state: this.stateOf(member) }
+        })
+        if (!changed) return
+        const stamped = await this.deps.store.writeStateJson(this.deps.store.paths.roomDoc(fresh.id), { ...fresh, members })
+        if (!stamped.ok) throw new Error(stamped.error)
+      } catch (error) {
+        this.warn(`member stamp failed for ${room.id}/${sessionId}: ${errorMessage(error)}`)
+      }
+    })
   }
 
   // ----------------------------------------------------------- live agents --

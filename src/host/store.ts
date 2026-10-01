@@ -194,7 +194,7 @@ export class CortexStore {
    * Different rooms stay independent, the chain never rejects (one failed write
    * cannot poison later writes), and the map entry is dropped once the chain
    * drains so one-post rooms are not retained. */
-  private serializePerRoom<T>(roomId: string, body: () => Promise<T>): Promise<T> {
+  serializePerRoom<T>(roomId: string, body: () => Promise<T>): Promise<T> {
     const previous = this.roomChains.get(roomId) ?? Promise.resolve()
     const result = previous.then(body, body)
     const tail = result.then(() => undefined, () => undefined)
@@ -331,12 +331,13 @@ export class CortexStore {
   /** Locate the file behind one id (archive included unless `archived` is set). */
   private async locate(id: string, pid: string | undefined, archived: boolean | undefined): Promise<{ entry: Entry; file: string; scope: Scope } | null> {
     if (!isSafeKey(id)) return null
-    const scopes: Scope[] = pid ? [{ track: 'project', pid }, { track: 'user' }, { track: 'global' }] : [{ track: 'user' }, { track: 'global' }, { track: 'project', pid: 'unknown' }]
+    const scopes: Scope[] = pid
+      ? [{ track: 'project', pid }, { track: 'user' }, { track: 'global' }]
+      : [{ track: 'user' }, { track: 'global' }]
     for (const scope of scopes) {
       const dirs = archived === undefined ? [this.paths.entries(scope), this.paths.archive(scope)] : [this.paths[archived ? 'archive' : 'entries'](scope)]
       for (const dir of dirs) {
         const file = join(dir, `${id}.json`)
-        if ((await sizeOf(file)) === null) continue
         const entry = await this.read<Entry | null>(file, null)
         if (entry && isSafeKey(entry.id)) return { entry, file, scope }
       }
@@ -940,8 +941,8 @@ export class CortexStore {
   getBoard(roomId: string, boardId: string): Promise<CortexResult<Board | null>> {
     return this.run('getBoard', async () => {
       if (!isSafeKey(roomId) || !isSafeKey(boardId)) return null
-      const result = await this.read<Board | null>(this.paths.boardDoc(roomId, boardId), null)
-      return result && result.id === boardId ? result : null
+      // File name IS the id, so no need to re-verify after read.
+      return await this.read<Board | null>(this.paths.boardDoc(roomId, boardId), null)
     })
   }
 
