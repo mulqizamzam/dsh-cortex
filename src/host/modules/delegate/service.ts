@@ -681,11 +681,52 @@ export class DelegateService {
   }
 }
 
-/** First meaningful output line (skip the sink's own cap marker), fallback to
- * the error text, then '(no output)' — never the whole tail (P2). */
-export function summarize(output: string, error?: string): string {
+/**
+ * Head window for the bounded path, in code units. The bound is not a guess
+ * about the content: it only has to cover a first line, and anything it cannot
+ * answer exactly falls through to the full-body rule below.
+ */
+const SUMMARY_SCAN_CHARS = 8192
+
+/**
+ * The ORIGINAL rule, verbatim: first non-empty line that is not the sink's cap
+ * marker, else the first non-empty line, else undefined. Single source of
+ * truth, so the bounded fast path and the full path cannot drift apart.
+ */
+function summaryLine(output: string): string | undefined {
   const lines = output.split('\n').map(line => line.trim()).filter(line => line !== '')
-  const first = lines.find(line => !line.startsWith('[…')) ?? lines[0]
+  return lines.find(line => !line.startsWith('[…')) ?? lines[0]
+}
+
+/** First genuine non-omitted line COMPLETE inside `head`, else undefined. */
+function completeFirstLine(head: string): string | undefined {
+  // Drop the tail segment: when the body continues past the window it has no
+  // terminating newline, so it is a partial line (and a byte-cut could also
+  // have torn a multi-byte char in it) — trusting it would change the answer.
+  const cut = head.lastIndexOf('\n')
+  if (cut < 0) return undefined
+  for (const raw of head.slice(0, cut).split('\n')) {
+    const trimmed = raw.trim()
+    if (trimmed === '' || trimmed.startsWith('[…')) continue
+    return trimmed
+  }
+  return undefined
+}
+
+/** First meaningful output line (skip the sink's own cap marker), fallback to
+ * the error text, then '(no output)' — never the whole tail (P2).
+ *
+ * Scanning the WHOLE body means splitting a 1 MiB stdout into ~17k strings
+ * just to read its first line (measured 1.7 ms / 7.2 MiB allocated). The fast
+ * path therefore answers only from a genuine non-omitted line that ENDS inside
+ * a bounded head — that answer is provably the same one the full rule picks,
+ * because no line before it can differ. Every other shape (no newline yet,
+ * only cap markers, empty head, a first line past the bound) runs the original
+ * full-body rule unchanged.
+ */
+export function summarize(output: string, error?: string): string {
+  const head = output.length > SUMMARY_SCAN_CHARS ? output.slice(0, SUMMARY_SCAN_CHARS) : output
+  const first = completeFirstLine(head) ?? summaryLine(output)
   return clampText(neutralize(first ?? error ?? '(no output)'), 240)
 }
 
