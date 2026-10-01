@@ -82,7 +82,7 @@ export class StreamSink {
     private readonly file: string,
     private readonly capBytes: number,
     private readonly persist: (file: string, text: string) => Promise<{ ok: boolean; error?: string }>,
-    flushIntervalMs = 250,
+    flushIntervalMs = 1000,
   ) {
     this.flushIntervalMs = Math.max(50, flushIntervalMs)
   }
