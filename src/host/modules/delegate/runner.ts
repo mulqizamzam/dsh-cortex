@@ -14,8 +14,9 @@
 import { spawn } from 'node:child_process'
 import type { ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
-import { copyFile } from 'node:fs/promises'
-import { sizeOf } from '../../../lib/fsx.ts'
+import { copyFile, open } from 'node:fs/promises'
+import { basename } from 'node:path'
+import { readTextSafe, sizeOf } from '../../../lib/fsx.ts'
 import { errorMessage } from '../../../lib/errors.ts'
 
 export type RunStatus = 'succeeded' | 'failed' | 'killed' | 'timeout'
@@ -187,6 +188,100 @@ export function tailByBytes(text: string, bytes: number): string {
     else low = mid + 1
   }
   return text.slice(low)
+}
+
+/**
+ * Read the TAIL of a job log file without reading (or decoding) the whole file.
+ *
+ * Byte-for-byte equivalent to `tailByBytes(await readTextSafe(file), tailBytes)`
+ * for a valid-UTF-8 file — which is every file this plugin writes
+ * (`StreamSink.persist` -> `writeTextAtomic`, tmp + rename) — including the two
+ * quirks a naive tail would miss:
+ *   - the cut is STRICTLY under the budget: an 8193 B file at tailBytes 8192
+ *     yields an 8191 B suffix (two head bytes gone, not one);
+ *   - the cut is a UTF-16 index, so when an astral pair starts EXACTLY at
+ *     `size - tailBytes` the full-decode result starts with a lone low
+ *     surrogate; an offset read reproduces that instead of U+FFFD.
+ *
+ * Mechanics: open once and stat that fd, so the size and the bytes come from
+ * one atomic view (the writer rewrites by rename, so an fd never sees a torn
+ * file). Small files (size <= tailBytes) are read whole through the same fd
+ * and pushed through the original formula. Larger files read only the last
+ * `tailBytes + 4` bytes (4 = the longest UTF-8 sequence: alignment slack for
+ * the cut). A short read (the file shrank) falls back to the full, original
+ * path rather than guessing. ENOENT answers the empty shape without a warning,
+ * exactly like `readTextSafe`.
+ *
+ * Declared deviation: a file that is NOT valid UTF-8 (nothing in this plugin
+ * can write one) — `readFile('utf8')` decodes it with replacement characters,
+ * so its re-encoded byte length differs from the file size that this function
+ * measures; the two implementations can then disagree.
+ */
+export async function readTailFile(
+  file: string,
+  tailBytes: number,
+  warn?: (message: string) => void,
+): Promise<{ text: string; truncated: boolean }> {
+  const unreadable = (error: unknown): void => {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') warn?.(`${basename(file)}: unreadable (${errorMessage(error)})`)
+  }
+  let handle: Awaited<ReturnType<typeof open>>
+  try {
+    handle = await open(file, 'r')
+  } catch (error) {
+    unreadable(error)
+    return { text: '', truncated: false }
+  }
+  try {
+    const size = (await handle.stat()).size
+    if (tailBytes <= 0) return { text: '', truncated: size > 0 }
+    if (size <= tailBytes) {
+      // Small path: identical to the original implementation (a fresh handle
+      // reads from offset 0), quirks included.
+      const raw = await handle.readFile('utf8')
+      const text = tailByBytes(raw, tailBytes)
+      return { text, truncated: Buffer.byteLength(raw, 'utf8') > Buffer.byteLength(text, 'utf8') }
+    }
+
+    // size > tailBytes: read only the window that can contain the cut.
+    const position = Math.max(0, size - tailBytes - 4)
+    const length = size - position
+    const buffer = Buffer.allocUnsafe(length)
+    const { bytesRead } = await handle.read(buffer, 0, length, position)
+    if (bytesRead < length) {
+      // Shrank under this fd (nothing in the plugin does that; a defensive
+      // fallback keeps the answer self-consistent instead of guessing).
+      const raw = (await readTextSafe(file, warn)) ?? ''
+      const text = tailByBytes(raw, tailBytes)
+      return { text, truncated: Buffer.byteLength(raw, 'utf8') > Buffer.byteLength(text, 'utf8') }
+    }
+
+    const at = size - tailBytes // the exact position the full-decode oracle cuts around
+    const index = at - position
+    const lead = buffer[index] ?? 0
+    // Case B: an astral pair starting exactly at `at` splits at the mid-pair
+    // UTF-16 index in the oracle; reproduce the lone low surrogate it yields.
+    if (index + 4 <= bytesRead && lead >= 0xf0 && lead <= 0xf4) {
+      const pair = buffer.subarray(index, index + 4).toString('utf8')
+      const low = pair.charCodeAt(1)
+      if (low >= 0xdc00 && low <= 0xdfff) {
+        const rest = buffer.subarray(index + 4).toString('utf8')
+        return { text: String.fromCharCode(low) + rest, truncated: true }
+      }
+    }
+    // Case A: first UTF-16 index whose suffix is strictly under the budget is
+    // the first codepoint boundary at or after `size - tailBytes + 1`; in bytes
+    // that is the first non-continuation byte from that offset.
+    let cut = at + 1 - position
+    if (cut < 0) cut = 0
+    while (cut < bytesRead && ((buffer[cut] ?? 0) & 0xc0) === 0x80) cut += 1
+    return { text: buffer.subarray(cut).toString('utf8'), truncated: true }
+  } catch (error) {
+    unreadable(error)
+    return { text: '', truncated: false }
+  } finally {
+    await handle.close().catch(() => {})
+  }
 }
 
 /** Copy one already-validated image into the job dir; returns the destination. */

@@ -31,7 +31,7 @@ import {
   WRITE_BACK_LABEL, asJobStatus, isDeadLetter, isLiveStatus, isRetryable, viewOf,
 } from './types.ts'
 import type { DelegateJob, DelegateView } from './types.ts'
-import { copyImage, runProcess, tailByBytes } from './runner.ts'
+import { copyImage, readTailFile, runProcess, tailByBytes } from './runner.ts'
 import type { RunningJob, RunOutcome } from './runner.ts'
 import { conflictService } from '../conflict/service.ts'
 import { refuse } from '../../rpc-error.ts'
@@ -320,8 +320,10 @@ export class DelegateService {
 
   async tail(kind: 'stdout' | 'stderr', jobId: string, tailBytes: number): Promise<{ text: string; truncated: boolean }> {
     const file = this.deps.store.jobPaths(jobId)[kind]
-    const raw = (await readTextSafe(file, message => this.deps.warn(`delegate: ${message}`))) ?? ''
-    return { text: tailByBytes(raw, tailBytes), truncated: Buffer.byteLength(raw, 'utf8') > Buffer.byteLength(tailByBytes(raw, tailBytes), 'utf8') }
+    // Offset read: only the last `tailBytes` bytes leave the disk. See
+    // `readTailFile` for the equivalence argument (and the one declared
+    // deviation: non-UTF-8 files, which this plugin cannot write).
+    return await readTailFile(file, tailBytes, message => this.deps.warn(`delegate: ${message}`))
   }
 
   async readResultFile(jobId: string): Promise<string | null> {
