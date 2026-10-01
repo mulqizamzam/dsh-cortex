@@ -18,6 +18,7 @@ import type { ModuleDeps } from '../../types.ts'
 import { renderMemoryBlock } from './render.ts'
 import type { AssembleResult } from './render.ts'
 import { ScopeCache, cwdOf } from './scope.ts'
+import { sharedScopeCache } from '../../scope.ts'
 import { ConfirmTokens } from './ops.ts'
 import type { MemoryContext } from './ops.ts'
 
@@ -31,8 +32,9 @@ export const RENDER_MAX_AGE_MS = 30_000
 export const RENDER_CACHE_MAX = 16
 
 /** Shared scope memo: the tools, the RPC endpoints and the injection agree on
- * one project/branch answer instead of each probing git. */
-export const scopeCache = new ScopeCache()
+ * one project/branch answer instead of each probing git — and now so do todo,
+ * logs and progress (M3): one memo for the whole plugin. */
+export const scopeCache = sharedScopeCache()
 
 /** Shared two-step confirmation tokens (delete). In-memory by design. */
 export const confirmTokens = new ConfirmTokens()

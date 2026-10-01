@@ -119,6 +119,8 @@ export function makeScopes(repoCwds: readonly string[] = ['/repo/alpha', '/repo/
     {
       repoRoot: async (cwd: string) => (cwd.startsWith('/repo/') ? (known.has(cwd) ? cwd : '/repo/alpha') : undefined),
       originRemote: async () => undefined,
+      // The unified cache probes the branch too; keep this seam hermetic.
+      currentBranch: async () => undefined,
       projectId: async ({ cwd }) => hashId(cwd),
     },
     { now: () => Date.now() },
