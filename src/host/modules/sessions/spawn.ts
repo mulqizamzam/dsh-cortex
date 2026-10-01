@@ -36,6 +36,7 @@ import type { ModuleDeps } from '../../types.ts'
 import type { RoomService } from '../rooms/service.ts'
 import type { DeliveryCounts, DeliveryResult } from '../rooms/service.ts'
 import { collectHandoff, renderHandoff, HANDOFF_BUDGET_CHARS } from './handoff.ts'
+import { sharedScopeCache } from '../../scope.ts'
 
 /** Extra absolute prefixes a spawn cwd may live under (empty in v1). */
 export const SPAWN_CWD_ALLOWLIST: readonly string[] = []
@@ -277,6 +278,20 @@ export async function spawnSession(input: SpawnInput, { deps, rooms }: SpawnDeps
     // read contributes an honest error line; it never invents content. The
     // handoff is prepended to the prompt so the spawned agent starts with context.
     const callerCwd = cwd.cwd
+    // The handoff must tell the spawned agent which project it is working on.
+    // A cwd basename (`parts[parts.length - 1]`) is wrong for two reasons: two
+    // repos with the same name share the same label, and the spawn happens
+    // from a cwd that might not be the repo root (worktree, sub-directory).
+    // `lib/pid.ts` derives the canonical project id from the git remote
+    // (winning over cwd) and the store keys every project directory by that
+    // same value — so the spawned agent gets the key the tool surface uses,
+    // not a display name it would have to guess at.
+    // M4: use the shared scope cache (alive since M3), not a fresh probe.
+    let projectName: string | undefined
+    if (callerCwd !== undefined) {
+      const scope = await sharedScopeCache().resolve(callerCwd)
+      projectName = scope.pid
+    }
     const source = {
       today: (): string => new Date().toISOString().slice(0, 10),
       label: (): string => cfg.injectLabel,
@@ -289,11 +304,7 @@ export async function spawnSession(input: SpawnInput, { deps, rooms }: SpawnDeps
         if (!result.ok) return { text: '', error: result.error }
         return { text: result.data.text }
       },
-      projectName: (): string | undefined => {
-        if (callerCwd === undefined) return undefined
-        const parts = callerCwd.split('/').filter(Boolean)
-        return parts[parts.length - 1]
-      },
+      projectName: (): string | undefined => projectName,
     }
     try {
       const handoffInput = await collectHandoff(source)
