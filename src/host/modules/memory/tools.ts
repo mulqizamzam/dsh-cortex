@@ -17,9 +17,11 @@ import type { ToolDefinition } from '../../dsh.ts'
 import type { ModuleDeps } from '../../types.ts'
 import { deleteEntry, listEntries, moveEntry, remember, search, updateEntry } from './ops.ts'
 import type { MemoryContext, OpResult } from './ops.ts'
+import type { Entry } from '../../types.ts'
 import { memoryContext } from './runtime.ts'
 import type { MemoryInjector } from './runtime.ts'
 import { cwdOf, sessionIdOf } from './scope.ts'
+import { gateMutation } from '../mutate-gate.ts'
 
 /** Model-facing text of one result: prose first, fields kept for the panel. */
 function shape<T>(result: OpResult<T>, prose: (value: T) => string): Record<string, unknown> {
@@ -128,15 +130,25 @@ export function buildTools(deps: ModuleDeps, injector: MemoryInjector): ToolDefi
   const archiveTool = defineTool({
     name: 'cortex_memory_archive',
     description:
-      'Move one memory out of the injected set by id (found with cortex_memory_search or list). Nothing is deleted: archived entries stay on disk and remain searchable, they simply stop being injected. Prefer this over delete.',
+      'Move one memory out of the injected set by id (found with cortex_memory_search or list). Nothing is deleted: archived entries stay on disk and remain searchable, they simply stop being injected. Prefer this over delete. '
+      + 'When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.',
     parameters: {
       type: 'object',
-      properties: { id: { type: 'string' } },
+      properties: {
+        id: { type: 'string' },
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
+      },
       required: ['id'],
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: renderValue },
     execute: async (args: Record<string, unknown>, execution: unknown) => {
-      const result = await moveEntry(context(), withSession(args, execution), 'archive')
+      const gateRequired = deps.cfg().mutate?.confirmRequired === true
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const gated = await gateMutation(gateRequired, `memory:archive:${id}`, args.confirm, `archive memory ${id} (it stays searchable but stops being injected)`, async () =>
+        moveEntry(context(), withSession(args, execution), 'archive'))
+      if (gated.token !== undefined) return { status: 'confirm-required', token: gated.token, warning: gated.warning }
+      if (!gated.ok) return { status: 'refused', message: gated.warning }
+      const result = gated.result as OpResult<Entry>
       if (result.ok === true) afterWrite()
       return shape(result, value => `Archived memory ${value.id}; it no longer shows in context but is still searchable with includeArchive.`)
     },
@@ -180,7 +192,9 @@ export function buildTools(deps: ModuleDeps, injector: MemoryInjector): ToolDefi
   const updateTool = defineTool({
     name: 'cortex_memory_update',
     description:
-      `Change one stored memory by id: content, importance (1 to 5), tags, or branch scope. Passing an empty branches array clears the branch scope, making the entry apply everywhere.${SCOPE_NOTE}`,
+      `Change one stored memory by id: content, importance (1 to 5), tags, or branch scope. Passing an empty branches array clears the branch scope, making the entry apply everywhere.`
+      + 'When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.'
+      + SCOPE_NOTE,
     parameters: {
       type: 'object',
       properties: {
@@ -189,12 +203,19 @@ export function buildTools(deps: ModuleDeps, injector: MemoryInjector): ToolDefi
         importance: { type: 'number' },
         tags: { type: 'array', items: { type: 'string' } },
         branches: { type: 'array', items: { type: 'string' } },
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
       },
       required: ['id'],
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: renderValue },
     execute: async (args: Record<string, unknown>, execution: unknown) => {
-      const result = await updateEntry(context(), withSession(args, execution))
+      const gateRequired = deps.cfg().mutate?.confirmRequired === true
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const gated = await gateMutation(gateRequired, `memory:update:${id}`, args.confirm, `overwrite memory ${id} with new content`, async () =>
+        updateEntry(context(), withSession(args, execution)))
+      if (gated.token !== undefined) return { status: 'confirm-required', token: gated.token, warning: gated.warning }
+      if (!gated.ok) return { status: 'refused', message: gated.warning }
+      const result = gated.result as OpResult<Entry>
       if (result.ok === true) afterWrite()
       return shape(result, value => `Updated memory ${value.id} (importance ${value.importance}, track ${value.track}).`)
     },

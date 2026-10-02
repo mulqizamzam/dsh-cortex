@@ -920,6 +920,73 @@ export function JobsTab(props: { state: PanelState['jobs']; model: PanelModel })
   )
 }
 
+// ---------------------------------------------------------------- decisions --
+
+export function DecisionsTab(props: { state: PanelState['decisions']; model: PanelModel }): ReactNode {
+  const { state, model } = props
+  const retry = () => void model.loadTab('decisions')
+  const listRows = state.list.kind === 'ready' ? state.list.value.decisions ?? [] : []
+  const searchRows = state.searchHits.kind === 'ready' ? state.searchHits.value.hits ?? [] : []
+  const showSearch = state.query.trim() !== ''
+  const rows = showSearch ? searchRows : listRows
+
+  return h(
+    'div',
+    { className: 'cx-tab cx-tab-decisions' },
+    h(
+      'div',
+      { style: S.row },
+      button('refresh', retry),
+      state.list.kind === 'loading' || state.searchHits.kind === 'loading' ? muted('loading…') : null,
+      h('input', {
+        type: 'text',
+        className: 'cx-search',
+        style: { ...S.input, flex: 1, minWidth: 0 },
+        placeholder: 'search decisions…',
+        value: state.query,
+        onInput: (e: React.FormEvent) => { void model.runDecisionSearch((e.target as HTMLInputElement).value) },
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === 'Enter') { void model.runDecisionSearch((e.currentTarget as HTMLInputElement).value) }
+        },
+      }),
+    ),
+    showSearch && state.searchHits.kind === 'error'
+      ? h('div', { style: S.error, role: 'alert' }, `search failed: ${state.searchHits.error.message}`)
+      : null,
+    !showSearch && state.list.kind === 'error'
+      ? h('div', { style: S.error, role: 'alert' }, `decisions.list failed: ${state.list.error.message}`)
+      : null,
+    rows.length === 0
+      ? muted(showSearch ? 'no decisions matched the search' : 'no decisions recorded yet — [decision] lines in project logs are indexed by cortex_decision_index_logs')
+      : h(
+          'div',
+          { className: 'cx-decisions' },
+          ...rows.map((row: any) =>
+            h(
+              'div',
+              {
+                key: row.id,
+                style: { ...S.card, marginBottom: 4, cursor: 'pointer' },
+                onClick: () => void model.selectDecision(row.id),
+              },
+              h(
+                'div',
+                { style: S.row },
+                badge(row.timestamp?.slice(0, 10) ?? row.id.slice(0, 8), 'plain'),
+                button(row.context ?? row.id, () => {}, { kind: 'ghost' }),
+                row.chosen ? badge(row.chosen, 'ok') : null,
+                row.owner ? muted(`by ${row.owner}`) : null,
+              ),
+              row.rationale ? h('div', { style: { ...S.muted, marginTop: 2 } }, row.rationale) : null,
+              (row.linkedEntries ?? []).length > 0
+                ? h('div', { style: { ...S.muted, marginTop: 2 } }, `linked to ${String(row.linkedEntries.length)} memory entr${row.linkedEntries.length === 1 ? 'y' : 'ies'}`)
+                : null,
+            ),
+          ),
+        ),
+  )
+}
+
 // ------------------------------------------------------------------ shell ----
 
 /** The tab strip + the one visible tab + the flash line. */
@@ -930,6 +997,7 @@ export function CortexPanelView(props: { state: PanelState; model: PanelModel })
     todo: h(TodoTab, { key: 'todo', state: state.todo, model }),
     rooms: h(RoomsTab, { key: 'rooms', state: state.rooms, model }),
     board: h(BoardTab, { key: 'board', state: state.board, model }),
+    decisions: h(DecisionsTab, { key: 'decisions', state: state.decisions, model }),
     prompts: h(PromptsTab, { key: 'prompts', state: state.prompts, model }),
     jobs: h(JobsTab, { key: 'jobs', state: state.jobs, model }),
   }

@@ -297,6 +297,50 @@ const fixtures: Record<string, MockHandler> = {
     value: { id: String(payload.id ?? 'pr-1'), title: 'Review checklist', body: 'Look at error paths first.', enabled: true },
   }),
 
+  // --- decisions ---------------------------------------------------------
+  // One decision with a rationale, one bare minimum, so the tab shows both the
+  // rich row and the sparse one. `linkedEntries` exercises the memory-link line.
+  'decisions.list': () => ({
+    ok: true,
+    value: {
+      decisions: [
+        {
+          id: 'd1a2b3c4d5e6',
+          context: 'Which purge confirm shape?',
+          options: ['fixed literal', 'two-step token'],
+          chosen: 'two-step token',
+          rationale: 'a fixed literal can be emitted by any model, so "confirmed" meant nothing',
+          owner: 'user',
+          timestamp: '2026-10-02T14:00:00.000Z',
+          tags: ['security'],
+          linkedEntries: ['a1b2c3d4e5f60718'],
+        },
+        {
+          id: 'd9z8y7x6w5v4',
+          context: 'Keep the config form?',
+          chosen: 'no form this release',
+          rationale: '',
+          owner: 'user',
+          timestamp: '2026-10-01T09:30:00.000Z',
+          tags: [],
+          linkedEntries: [],
+        },
+      ],
+      total: 2,
+      text: '## Decision log (dsh-cortex mock)',
+    },
+  }),
+  'decisions.search': payload => {
+    const query = String(payload.query ?? '').toLowerCase()
+    const all = [
+      { id: 'd1a2b3c4d5e6', context: 'Which purge confirm shape?', chosen: 'two-step token', rationale: 'a fixed literal can be emitted by any model', owner: 'user', timestamp: '2026-10-02T14:00:00.000Z', tags: ['security'], linkedEntries: ['a1b2c3d4e5f60718'] },
+      { id: 'd9z8y7x6w5v4', context: 'Keep the config form?', chosen: 'no form this release', rationale: '', owner: 'user', timestamp: '2026-10-01T09:30:00.000Z', tags: [], linkedEntries: [] },
+    ]
+    const hits = query === '' ? all : all.filter(row => `${row.context} ${row.chosen} ${row.rationale}`.toLowerCase().includes(query))
+    return { ok: true as const, value: { hits, total: hits.length, text: `## Decision log (mock search, ${String(hits.length)} hit(s))` } }
+  },
+  'decisions.link': payload => ({ ok: true, value: { message: `linked to ${String(payload.id ?? '')}`, linkedEntries: ['a1b2c3d4e5f60718'] } }),
+
   // ---- writes ----
   'pending.approve': payload =>
     payload.id === PENDING_ID

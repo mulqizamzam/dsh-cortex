@@ -392,6 +392,34 @@ export interface PromptsListValue {
   enabled?: boolean
 }
 
+// ------------------------------------------------------- decisions wire ----
+
+/** One decision as it arrives on the wire (mirrors host `decisions.list`/`search`). */
+export interface DecisionRow {
+  id: string
+  context: string
+  options?: string[]
+  chosen?: string
+  rationale?: string
+  owner?: string
+  timestamp?: string
+  pid?: string
+  tags?: string[]
+  linkedEntries?: string[]
+}
+
+export interface DecisionsListValue {
+  decisions: DecisionRow[]
+  total: number
+  text: string
+}
+
+export interface DecisionsSearchValue {
+  hits: DecisionRow[]
+  total: number
+  text: string
+}
+
 export interface ActionResult {
   ok?: boolean
   message?: string
@@ -449,6 +477,10 @@ export interface CortexApi {
 
   promptsList(): Promise<CortexResult<PromptsListValue>>
   promptsGet(id: string): Promise<CortexResult<PromptRow>>
+
+  decisionsList(limit?: number): Promise<CortexResult<DecisionsListValue>>
+  decisionsSearch(query: string, pid?: string): Promise<CortexResult<DecisionsSearchValue>>
+  decisionsLink(id: string, entryIds: string[]): Promise<CortexResult<ActionResult>>
 
   boardsList(roomId: string): Promise<CortexResult<BoardsListValue>>
   boardsGet(roomId: string, boardId: string, options?: { includeComments?: boolean }): Promise<CortexResult<BoardsGetValue>>
@@ -681,6 +713,16 @@ export function createCortexApi(call: RpcCall, options: CortexApiOptions = {}): 
     promptsList: () => read<PromptsListValue>('prompts.list', {}),
     promptsGet: id => read<PromptRow>('prompts.get', { id }),
 
+    decisionsList: limit =>
+      read<DecisionsListValue>('decisions.list', limit === undefined ? {} : { limit }).then(result =>
+        result.ok === false ? result : { ok: true as const, value: normalizeDecisionsList(result.value) },
+      ),
+    decisionsSearch: (query, pid) =>
+      read<DecisionsSearchValue>('decisions.search', { query, ...(pid === undefined ? {} : { pid }) }).then(result =>
+        result.ok === false ? result : { ok: true as const, value: normalizeDecisionsSearch(result.value) },
+      ),
+    decisionsLink: (id, entryIds) => write<ActionResult>('decisions.link', { id, entryIds }),
+
     boardsList: roomId => read<BoardsListValue>('boards.list', { roomId }),
     boardsGet: (roomId, boardId, options) =>
       read<BoardsGetValue>('boards.get', {
@@ -725,6 +767,38 @@ export function normalizeJobs(raw: JobsListValue | JobRow[] | unknown): JobsList
   if (Array.isArray(raw)) return { jobs: raw as JobRow[] }
   if (isRecord(raw) && Array.isArray(raw.jobs)) return { ...(raw as unknown as JobsListValue) }
   return { jobs: [] }
+}
+
+// --------------------------------------------------------------- decisions ----
+
+/**
+ * The host contract is `{decisions, total, text}`, but an older or reduced
+ * host may answer a bare array. Accept both and always return the contract
+ * shape so the panel never branches on the transport.
+ */
+export function normalizeDecisionsList(raw: unknown): DecisionsListValue {
+  if (Array.isArray(raw)) return { decisions: raw as DecisionRow[], total: raw.length, text: '' }
+  if (isRecord(raw) && Array.isArray(raw.decisions)) {
+    return {
+      decisions: raw.decisions as DecisionRow[],
+      total: typeof raw.total === 'number' ? raw.total : (raw.decisions as DecisionRow[]).length,
+      text: typeof raw.text === 'string' ? raw.text : '',
+    }
+  }
+  return { decisions: [], total: 0, text: '' }
+}
+
+/** `decisions.search` → `{hits, total, text}` or a bare array. */
+export function normalizeDecisionsSearch(raw: unknown): DecisionsSearchValue {
+  if (Array.isArray(raw)) return { hits: raw as DecisionRow[], total: raw.length, text: '' }
+  if (isRecord(raw) && Array.isArray(raw.hits)) {
+    return {
+      hits: raw.hits as DecisionRow[],
+      total: typeof raw.total === 'number' ? raw.total : (raw.hits as DecisionRow[]).length,
+      text: typeof raw.text === 'string' ? raw.text : '',
+    }
+  }
+  return { hits: [], total: 0, text: '' }
 }
 
 // ------------------------------------------------------------------- board ----

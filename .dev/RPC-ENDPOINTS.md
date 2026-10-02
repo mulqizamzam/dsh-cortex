@@ -27,11 +27,11 @@ pid via store.pidFromCwd bila cwd diberikan; tanpa scope → proyek aktif sesi p
 - pending.approve {id} → hasil per-kind (entry id / todo id / prompt id) — SATU-SATUNYA
   jalur tulis memori utk konten usulan AI; hanya dipanggil UI.
 - pending.reject {id, reason?} → ok
-- memory.update {id, patch{content?,importance?,tags?,branches?}} → entry
-- memory.archive {id} | memory.restore {id} → ok
-- memory.delete {id, confirm:"DELETE"} → ok   (confirm persis; purge lihat tool)
+- memory.update {id, patch{content?,importance?,tags?,branches?,confirm?}} → entry   (confirm = token two-step bila mutate.confirmRequired)
+- memory.archive {id, confirm?} | memory.restore {id} → ok   (archive: token two-step bila mutate.confirmRequired)
+- memory.delete {id, confirm} → ok   (two-step, tak berubah; purge lihat tool)
 - todo.add {track,text,important?,urgent?,due?} → item (jalur UI manusia: LANGSUNG, tanpa pending)
-- todo.complete {id} | todo.remove {id} → ok
+- todo.complete {id, confirm?} | todo.remove {id, confirm?} → ok   (confirm = token two-step bila mutate.confirmRequired)
 - prompts.save {id?, title, body, category?} → doc (jalur UI: langsung)
 - prompts.toggle {id, enabled} → ok
 - prompts.delete {id, confirm:"DELETE"} → ok
@@ -44,7 +44,7 @@ pid via store.pidFromCwd bila cwd diberikan; tanpa scope → proyek aktif sesi p
 - rooms.send {sessionId, text} → ok | refusal (sesi tak hidup; tidak auto-create)
 - jobs.retry {jobId} → newJobId (hanya bila runner masih terdaftar & enabled)
 - jobs.cancel {jobId} → ok
-- purge.request {} → {confirmToken} ; purge.exec {confirmToken, confirm:"DELETE-CORTEX-DATA"} → ok (token satu-kali, umur 5 menit; token dibuat di memori host)
+- purge.step1 {} → {token} ; purge.step2 {confirm} → ok (token satu-kali, umur 5 menit; literal lama `PURGE_ALL_CORTEX_STATE` ditolak — v0.2.0 D-03, mekanisme sama seperti memory.delete)
 
 Tambahan modul dicatat di bawah file ini oleh pemilik modul (append-only, dengan
 tanggal). M7: mock adapter = fixture statis per endpoint di atas.

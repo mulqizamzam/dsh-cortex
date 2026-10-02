@@ -128,7 +128,7 @@ export function boardEndpoints(svc: BoardService): { read: Record<string, Endpoi
       if (!['backlog', 'in-progress', 'done'].includes(status)) return asNope('status must be backlog, in-progress, or done')
       const result = await svc.moveCard(roomId, boardId, cardId, status as never)
       return result.ok
-        ? { ok: true, value: neutralizeDeep({ card: result.card ?? null, message: result.message }) }
+        ? { ok: true, value: neutralizeDeep({ card: result.card ?? null, unblocked: result.unblocked ?? [], message: result.message }) }
         : asNope(result.message, 'refused')
     },
     'boards.comment': async (payload) => {

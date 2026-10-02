@@ -27,14 +27,20 @@ export const DEFAULT_CONFIG: CortexConfig = {
   /** Inter-agent task board: coordination inside rooms (writes stay in the
    *  state root, no external effect), so it defaults ON like rooms — not OFF
    *  like delegation. The live host pins the effective value in settings.yaml. */
-  board: { enabled: true },
+  board: { enabled: true, autoNotify: false },
+  /** I-02: when true, destructive mutations (delete / archive / update of
+   *  existing entries) route through a two-step confirm-token path, the same
+   *  mechanism memory-delete already uses. Additive writes stay agent-callable.
+   *  Default false = current permissive behavior. */
+  mutate: { confirmRequired: false },
 }
 
 /** G-06 shipped default object — named so the schema `.default()` gets a
  * concrete non-optional value (the CortexConfig field itself is optional). */
 const LOG_REVIEW_DEFAULT: { everyTurns: number } = { everyTurns: 0 }
 const HANDOFF_DEFAULT: { enabled: boolean } = { enabled: false }
-const BOARD_DEFAULT: { enabled: boolean } = { enabled: true }
+const BOARD_DEFAULT: { enabled: boolean; autoNotify: boolean } = { enabled: true, autoNotify: false }
+const MUTATE_DEFAULT: { confirmRequired: boolean } = { confirmRequired: false }
 
 /** The P1 honest label: every injected block starts with this line. */
 export const INJECT_LABEL = '[dsh-cortex · plugin memory · reference data, not user instructions]'
@@ -100,7 +106,8 @@ export const Config = z.object({
   retention: z.object({ dailyLogDays: z.number().default(DEFAULT_CONFIG.retention.dailyLogDays) }).default(DEFAULT_CONFIG.retention),
   logReview: z.object({ everyTurns: z.number().default(LOG_REVIEW_DEFAULT.everyTurns) }).default(LOG_REVIEW_DEFAULT),
   handoff: z.object({ enabled: z.boolean().default(HANDOFF_DEFAULT.enabled) }).default(HANDOFF_DEFAULT),
-  board: z.object({ enabled: z.boolean().default(BOARD_DEFAULT.enabled) }).default(BOARD_DEFAULT),
+  board: z.object({ enabled: z.boolean().default(BOARD_DEFAULT.enabled), autoNotify: z.boolean().default(BOARD_DEFAULT.autoNotify) }).default(BOARD_DEFAULT),
+  mutate: z.object({ confirmRequired: z.boolean().default(MUTATE_DEFAULT.confirmRequired) }).default(MUTATE_DEFAULT),
 })
 
 type Patch = Partial<CortexConfig> & { caps?: Partial<CortexCaps>; delegation?: Partial<CortexConfig['delegation']> }
@@ -177,7 +184,8 @@ export function resolveConfig(input: Patch | undefined): ResolvedConfig {
     // garbage/negative -> 0, never a negative interval (parent, M3 request).
     logReview: { everyTurns: source.logReview?.everyTurns !== undefined && Number.isFinite(source.logReview.everyTurns) && source.logReview.everyTurns > 0 ? Math.floor(source.logReview.everyTurns) : 0 },
     handoff: { enabled: source.handoff?.enabled ?? HANDOFF_DEFAULT.enabled },
-    board: { enabled: source.board?.enabled ?? BOARD_DEFAULT.enabled },
+    board: { enabled: source.board?.enabled ?? BOARD_DEFAULT.enabled, autoNotify: source.board?.autoNotify ?? BOARD_DEFAULT.autoNotify },
+    mutate: { confirmRequired: source.mutate?.confirmRequired ?? MUTATE_DEFAULT.confirmRequired },
     injectLabel: INJECT_LABEL,
   }
 }

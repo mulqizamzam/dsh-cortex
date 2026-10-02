@@ -8,8 +8,9 @@
 import { JSON_OBJECT_OUTPUT, defineTool, text } from '../../dsh.ts'
 import type { ToolDefinition } from '../../dsh.ts'
 import { neutralizeDeep } from '../../../lib/sanitize.ts'
-import type { BoardService } from './service.ts'
+import type { BoardService, BoardOutcome } from './service.ts'
 import type { BoardCard, BoardStatus } from '../../types.ts'
+import { gateMutation } from '../mutate-gate.ts'
 
 type Args = Record<string, unknown>
 interface Execution { signal: AbortSignal; agent?: import('../../dsh.ts').HostAgent }
@@ -196,6 +197,7 @@ export function boardTools(svc: BoardService): ToolDefinition[] {
         message: result.message,
         cardId: result.card?.id ?? null,
         cardStatus: result.card?.status ?? null,
+        unblocked: result.unblocked ?? [],
       })
     },
   } as never)
@@ -239,16 +241,27 @@ export function boardTools(svc: BoardService): ToolDefinition[] {
     description:
       'Delete a board and all its cards and comments. '
       + 'This is destructive: use it only when the work is truly abandoned, '
-      + 'not to hide stale boards.',
+      + 'not to hide stale boards. When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.',
     parameters: {
       type: 'object',
-      properties: { roomId: ROOM_ID, boardId: BOARD_ID },
+      properties: {
+        roomId: ROOM_ID,
+        boardId: BOARD_ID,
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
+      },
       required: ['roomId', 'boardId'],
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
     execute: async (args: never) => {
       const a = (args ?? {}) as Args
-      const result = await svc.delete(String(a.roomId ?? ''), String(a.boardId ?? ''))
+      const gateRequired = svc.cfg().mutate?.confirmRequired === true
+      const roomId = String(a.roomId ?? '')
+      const boardId = String(a.boardId ?? '')
+      const gated = await gateMutation(gateRequired, `board:delete:${roomId}/${boardId}`, a.confirm, `delete board ${boardId} in room ${roomId} (all cards and comments lost)`, async () =>
+        svc.delete(roomId, boardId))
+      if (gated.token !== undefined) return neutralizeDeep({ status: 'confirm-required', token: gated.token, warning: gated.warning })
+      if (!gated.ok) return neutralizeDeep({ status: 'refused', message: gated.warning })
+      const result = gated.result as BoardOutcome
       return neutralizeDeep({
         status: result.ok ? 'deleted' : 'refused',
         message: result.message,

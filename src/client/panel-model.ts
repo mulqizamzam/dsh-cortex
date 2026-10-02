@@ -46,19 +46,22 @@ import type {
   CortexResult,
   CortexScope,
   MemoryFilter,
+  DecisionsListValue,
+  DecisionsSearchValue,
 } from './api.ts'
 import { memoryFilterArgs, nestedScope, roomStateOf, scopeFields } from './api.ts'
 
 /** One async slot. `error` wins over an older `value` on purpose. */
 export type Load<T> = { kind: 'idle' } | { kind: 'loading' } | { kind: 'ready'; value: T } | { kind: 'error'; error: CortexError; value?: T }
 
-export type TabId = 'memory' | 'todo' | 'rooms' | 'board' | 'prompts' | 'jobs'
+export type TabId = 'memory' | 'todo' | 'rooms' | 'board' | 'decisions' | 'prompts' | 'jobs'
 
 export const TABS: ReadonlyArray<{ id: TabId; label: string }> = [
   { id: 'memory', label: 'Memory' },
   { id: 'todo', label: 'Todo' },
   { id: 'rooms', label: 'Rooms' },
   { id: 'board', label: 'Board' },
+  { id: 'decisions', label: 'Decisions' },
   { id: 'prompts', label: 'Prompts' },
   { id: 'jobs', label: 'Jobs' },
 ]
@@ -107,6 +110,13 @@ export interface PromptsState {
   selectedId: string | null
 }
 
+export interface DecisionsState {
+  list: Load<DecisionsListValue>
+  searchHits: Load<DecisionsSearchValue>
+  query: string
+  selectedId: string | null
+}
+
 export interface JobsState {
   list: Load<JobsListValue>
   selectedId: string | null
@@ -138,6 +148,7 @@ export interface PanelState {
   rooms: RoomsState
   prompts: PromptsState
   board: BoardState
+  decisions: DecisionsState
   jobs: JobsState
 }
 
@@ -182,6 +193,9 @@ export interface PanelModel {
   spawnMember(input: { roomId: string; label: string; prompt: string }): Promise<void>
 
   selectPrompt(id: string): Promise<void>
+
+  runDecisionSearch(query: string): Promise<void>
+  selectDecision(id: string): Promise<void>
 
   selectJob(jobId: string): Promise<void>
   cancelJob(jobId: string): Promise<void>
@@ -250,6 +264,7 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
       spawnPrompt: '',
     },
     prompts: { list: { kind: 'idle' }, detail: { kind: 'idle' }, selectedId: null },
+    decisions: { list: { kind: 'idle' }, searchHits: { kind: 'idle' }, query: '', selectedId: null },
     board: {
       boardsByRoom: {},
       active: { kind: 'idle' },
@@ -721,6 +736,32 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     patch({ board: { ...state.board, roomId: null, boardId: null, active: { kind: 'idle' } } })
   }
 
+  // ----------------------------------------------------------- decisions ----
+
+  async function loadDecisions(): Promise<void> {
+    patch({ decisions: { ...state.decisions, list: { kind: 'loading' } } })
+    const query = state.decisions.query.trim()
+    if (query === '') {
+      patch({ decisions: { ...state.decisions, searchHits: { kind: 'idle' } } })
+      const result = await api.decisionsList()
+      patch({ decisions: { ...state.decisions, list: result.ok ? { kind: 'ready', value: result.value } : errorOf(result.error, valueOf(state.decisions.list)) } })
+    } else {
+      patch({ decisions: { ...state.decisions, searchHits: { kind: 'loading' } } })
+      const result = await api.decisionsSearch(query)
+      patch({ decisions: { ...state.decisions, searchHits: result.ok ? { kind: 'ready', value: result.value } : errorOf(result.error) } })
+    }
+    loaded.add('decisions')
+  }
+
+  async function runDecisionSearch(query: string): Promise<void> {
+    patch({ decisions: { ...state.decisions, query } })
+    await loadDecisions()
+  }
+
+  async function selectDecision(id: string): Promise<void> {
+    patch({ decisions: { ...state.decisions, selectedId: id } })
+  }
+
   // ------------------------------------------------------------ dispatch ----
 
   async function loadTab(tab: TabId = state.tab): Promise<void> {
@@ -728,6 +769,7 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     if (tab === 'todo') return loadTodo()
     if (tab === 'rooms') return loadRooms()
     if (tab === 'board') return loadBoard()
+    if (tab === 'decisions') return loadDecisions()
     if (tab === 'prompts') return loadPrompts()
     return loadJobs()
   }
@@ -802,6 +844,9 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     spawnMember: input => busy(() => spawnMember(input)),
 
     selectPrompt,
+
+    runDecisionSearch,
+    selectDecision,
 
     async selectJob(jobId) {
       await busy(() => openJob(jobId))

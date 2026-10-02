@@ -13,6 +13,8 @@ import { clampText } from '../../../lib/caps.ts'
 import { neutralizeDeep } from '../../../lib/sanitize.ts'
 import { formatTodoList } from './digest.ts'
 import type { TodoService } from './service.ts'
+import type { TodoWriteResult } from './service.ts'
+import { gateMutation } from '../mutate-gate.ts'
 
 type Args = Record<string, unknown>
 interface Execution { signal: AbortSignal; agent?: unknown }
@@ -93,32 +95,50 @@ export function todoTools(svc: TodoService): ToolDefinition[] {
 
   const complete = defineTool({
     name: 'cortex_todo_complete',
-    description: 'Mark one todo done by its id (from cortex_todo_list or the injected todo digest). Refuses unknown ids with a sentence.',
+    description: 'Mark one todo done by its id (from cortex_todo_list or the injected todo digest). Refuses unknown ids with a sentence. When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.',
     parameters: {
       type: 'object',
-      properties: { id: { type: 'string', description: 'The 12-character todo id.' } },
+      properties: {
+        id: { type: 'string', description: 'The 12-character todo id.' },
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
+      },
       required: ['id'],
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
     execute: async (args: never, execution: Execution) => {
       const a = (args ?? {}) as Args
-      const result = await svc.completeTodo(a.id, execution?.agent)
+      const gateRequired = svc.deps.cfg().mutate?.confirmRequired === true
+      const id = typeof a.id === 'string' ? a.id.trim() : ''
+      const gated = await gateMutation(gateRequired, `todo:complete:${id}`, a.confirm, `mark todo ${id} done`, async () =>
+        svc.completeTodo(a.id, execution?.agent))
+      if (gated.token !== undefined) return neutralizeDeep({ status: 'confirm-required', token: gated.token, warning: gated.warning })
+      if (!gated.ok) return neutralizeDeep({ status: 'refused', message: gated.warning })
+      const result = gated.result as TodoWriteResult
       return neutralizeDeep({ status: result.ok ? 'completed' : 'refused', message: result.message, todo: result.item ?? null })
     },
   } as never)
 
   const remove = defineTool({
     name: 'cortex_todo_remove',
-    description: 'Delete one todo by id. Use cortex_todo_complete for finished work; this throws the record away.',
+    description: 'Delete one todo by id. Use cortex_todo_complete for finished work; this throws the record away. When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.',
     parameters: {
       type: 'object',
-      properties: { id: { type: 'string', description: 'The 12-character todo id.' } },
+      properties: {
+        id: { type: 'string', description: 'The 12-character todo id.' },
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
+      },
       required: ['id'],
     },
     output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
     execute: async (args: never, execution: Execution) => {
       const a = (args ?? {}) as Args
-      const result = await svc.removeTodo(a.id, execution?.agent)
+      const gateRequired = svc.deps.cfg().mutate?.confirmRequired === true
+      const id = typeof a.id === 'string' ? a.id.trim() : ''
+      const gated = await gateMutation(gateRequired, `todo:remove:${id}`, a.confirm, `permanently delete todo ${id}`, async () =>
+        svc.removeTodo(a.id, execution?.agent))
+      if (gated.token !== undefined) return neutralizeDeep({ status: 'confirm-required', token: gated.token, warning: gated.warning })
+      if (!gated.ok) return neutralizeDeep({ status: 'refused', message: gated.warning })
+      const result = gated.result as TodoWriteResult
       return neutralizeDeep({ status: result.ok ? 'removed' : 'refused', message: result.message })
     },
   } as never)

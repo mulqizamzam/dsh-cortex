@@ -101,12 +101,12 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
   perintah eksplisit user di sesi ini (tetap tetap: origin=ai-confirmed).
 - `cortex_memory_search {query, tracks?, project?, includeArchive?, limit?}` → hasil snippet ter-cap.
 - `cortex_memory_list {track?, branchOnly?, archived?}`
-- `cortex_memory_archive {id}` / `cortex_memory_restore {id}` / `cortex_memory_delete {id, confirmId}` (delete butuh konfirmasi dua langkah).
-- `cortex_memory_update {id, content?, importance?, branches?, tags?}`
+- `cortex_memory_archive {id, confirm?}` / `cortex_memory_restore {id}` / `cortex_memory_delete {id, confirm}` (delete butuh konfirmasi dua langkah; archive gated on `mutate.confirmRequired`).
+- `cortex_memory_update {id, content?, importance?, branches?, tags?, confirm?}` (gated on `mutate.confirmRequired`).
 
 **Todo & log**
 - `cortex_todo_add {track:"life|work|project|daily", text, important?, urgent?, due?}`
-- `cortex_todo_list {tracks?, openOnly?}` / `cortex_todo_complete {id}` / `cortex_todo_remove {id}`
+- `cortex_todo_list {tracks?, openOnly?}` / `cortex_todo_complete {id, confirm?}` / `cortex_todo_remove {id, confirm?}` (complete/remove gated on `mutate.confirmRequired`)
 - `cortex_log_append {scope:"project|daily", text}`
 - `cortex_log_read {scope, date?, lastDays?}`
 - `cortex_progress_report {}` → sintesis: open todos + N entri project terbaru + tail log hari ini.
@@ -139,14 +139,65 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
 
 **Pendukung**
 - ~~`cortex_pending_list {}` / `cortex_pending_reject {id}`~~ — DITANCANG tapi **belum diimplementasikan**. Approve/reject proposal utama lewat UI (the Cortex panel) saja yang tersedia.
-- `cortex_purge {scope:"all", confirm:"DELETE-CORTEX-DATA"}` → hapus state root; satu-satunya operasi destruktif, wajib string konfirmasi persis.
+- `cortex_purge` → hapus state root; satu-satunya operasi destruktif. **Dua langkah (v0.2.0, D-03):** panggil tanpa `confirm` untuk dapat token sekali-pakai (TTL 5 menit), lalu panggil lagi dengan token itu. Literal lama `PURGE_ALL_CORTEX_STATE` ditahan/ditolak — bukan lagi bentuk konfirmasi. Mekanisme sama persis dengan `cortex_memory_delete` (`ConfirmTokens`).
 
 ## 5. Permukaan UI (client)
 
 Ikuti pola plugin lokal yang sudah jalan (dsh-mnemon / dsh-ui-skin-switcher):
-1. **Tab sesi "Cortex"** dengan panel: Memory (filter track/project/branch/archive + search), Todo, Pending (approve/reject), Rooms (messages, gambar, status, tombol spawn), Prompts (CRUD + inject controls), Delegation (jobs, live tail, enable toggle), Settings-plugin (semua §3 + toggles §7).
+1. **Tab sesi "Cortex"** dengan panel: Memory (filter track/project/branch/archive + search), Todo, Pending (approve/reject), Rooms (messages, gambar, status, tombol spawn), Board (cards, dependencies, comments), **Decisions** (list + search, D-01 v0.2.0), Prompts (CRUD + inject controls), Delegation (jobs, live tail, enable toggle), Settings-plugin (semua §3 + toggles §7).
 2. **Indikator kecil** di composer? — TIDAK di v1 (menghindari DOM-hacking rapuh ala bookmark-injector). Cukup panel.
 3. Semua tulis-manusia di UI memanggil RPC host yang sudah diautentikasi; cortex **tidak membuka HTTP API publik baru** bila mekanisme RPC/plugin-channel tersedia (keputusan OQ-2).
+
+### 5.1 v0.2.0 — tab ke-7 dan ketiga_endpoint baru (D-01)
+
+Keputusan owner: tab **Decisions** adalah tab ke-7, bukan sub-filter di Memory.
+Alasannya konseptual, bukan sekadar UI: entri memori adalah *fakta*, decision
+adalah *pilihan + alasan*, dan layer "kenapa kita memilih X" adalah sesuatu yang
+PRD klaim ada tapi tidak pernah terlihat. Konsekuensi:
+
+- `TabId` gaining `'decisions'`; `TABS` array gaining `{ id: 'decisions', label: 'Decisions' }`.
+- Tiga endpoint RPC baru,第一 kali module ini punya permukaan non-tool:
+  - `decisions.list` (read) → `{ decisions, total, text }`
+  - `decisions.search` (read) → `{ hits, total, text }`
+  - `decisions.link` (write) → `{ linkedEntries, message }`
+- Modul `decisions` sekarang memanggil `bindDecisionEndpoints(svc)` di `apply()` —
+  tanpa itu keempat tool-nya tetap jalan tapi setiap `decisions.*` menjawab
+  `not-wired` (pola split yang board module harus tutup lebih dulu).
+- Client menormalkan dua bentuk wire: `{decisions,total,text}` (kontrak) dan array
+  polos (host lama/reduksi) — `normalizeDecisionsList` / `normalizeDecisionsSearch`.
+
+### 5.2 D-02 — board auto-unblock (v0.2.0)
+
+Sebelumnya `card.dependencies` tersimpan tapi tak pernah dibaca: `moveCard` cuma
+mengubah status. Silent stall (A selesai, B nunggu, tak ada yang bilang) jadi
+kegagalan multi-agent paling sering.
+
+Perilaku baru, **hanya** saat `board.autoNotify === true` (default `false`, P3):
+1. `moveCard → done` → `unblockDependents()`: baca semua card di board,
+   pilih yang `status === 'backlog'` dan `dependencies` memuat id card yang
+   baru selesai.
+2. Setiap card itu pindah ke `in-progress` + komentar `unblocked: card <id>
+   reached done` berpenanda mesin `dsh-cortex:board`.
+3. Batas tegas: card `in-progress`/`done` tidak disentuh (jangan rebut status
+   dari agen yang lagi kerja); cascade non-rekursif (rantai resolusi lewat
+   beberapa langkah); cycle pada `dependencies` terminasi karena tiap card
+   diproses sekali.
+
+Config baru: `board.autoNotify: false`.
+
+### 5.3 I-02 — gerbang mutasi destruktif (v0.2.0)
+
+Prinsip: tulis aditif (add, append, post) tetap bisa dipanggil agen tanpa
+konfirmasi. Yang dikunci hanya mutasi yang kehilangan data:
+`cortex_memory_archive`, `cortex_memory_update`, `cortex_todo_complete`,
+`cortex_todo_remove`, `cortex_board_delete`.
+
+Mekanisme: helper `gateMutation()` di `src/host/modules/mutate-gate.ts`
+membungkus operasi. Saat `mutate.confirmRequired === true` (default `false`),
+panggilan pertama tanpa `confirm` mengembalikan token sekali-pakai (TTL 5 menit,
+`ConfirmTokens`), panggilan kedua wajib menyodorkan token yang persis sama.
+Guess, literal lama, token terpakai, atau token kedaluwarsa — semua ditolak dan
+tak ada yang dieksekusi.
 
 ## 6. Lifecycle
 

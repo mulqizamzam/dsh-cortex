@@ -2,12 +2,14 @@
  * M-decisions: decision module face.
  *
  * Parses [decision] tagged lines from logs into structured JSON records,
- * and provides a search endpoint over those records.
+ * exposes a search/list/link surface to both the model (tools) and the panel
+ * (RPC endpoints), and links decisions to the memory entries they came from.
  */
 import { registerLifecycle, registerToolSafe } from '../../dsh.ts'
 import type { ModuleDeps } from '../../types.ts'
 import { DecisionService, decisionService } from './service.ts'
 import { decisionTools } from './tools.ts'
+import { bindDecisionEndpoints } from './rpc.ts'
 
 export const name = 'decisions'
 
@@ -19,20 +21,23 @@ export const TOOLS = [
   'cortex_decision_link',
 ] as const
 
+export { bindDecisionEndpoints, readEndpoints, writeEndpoints, decisionEndpoints } from './rpc.ts'
 export { DecisionService, decisionService } from './service.ts'
 export { parseDecisionLine } from './parser.ts'
 export { renderDecision, renderDecisionList, decisionListHeader, LINK_LIMIT, LINK_MAX } from './service.ts'
 export type { Decision, DecisionParseResult } from './types.ts'
 export type { DecisionSearchHit, DecisionSearchResult, DecisionListResult, IndexResult } from './service.ts'
 
-export const readEndpoints: Record<string, never> = {}
-export const writeEndpoints: Record<string, never> = {}
-
 let svc: DecisionService | null = null
 export function getDecisionService(): DecisionService | null { return svc }
 
 export function apply(deps: ModuleDeps): void {
   svc = decisionService(deps)
+  // The RPC maps close over the service, so they only answer once the registry
+  // points at THIS instance. Without this the four tools work and every
+  // `decisions.*` call refuses with "not-wired" — the same two-path split the
+  // board module had to close.
+  bindDecisionEndpoints(svc)
 
   registerLifecycle(deps.ctx, () => { svc = null }, 'dsh-cortex:decisions service', deps.warn)
 

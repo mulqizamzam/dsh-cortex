@@ -104,7 +104,7 @@ describe('conversation panel', () => {
     const model = createPanelModel(createCortexApi(createMockTransport().call))
     const handle = await mount(CortexPanel as never, { model })
     expect(handle.query('[role=tab]').map(item => item.getAttribute('data-tab')))
-      .toEqual(['memory', 'todo', 'rooms', 'board', 'prompts', 'jobs'])
+      .toEqual(['memory', 'todo', 'rooms', 'board', 'decisions', 'prompts', 'jobs'])
     await model.loadTab('memory')
     const textContent = handle.text()
     expect(textContent).toContain('Prefers terse answers')

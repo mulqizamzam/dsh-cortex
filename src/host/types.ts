@@ -259,7 +259,15 @@ export interface CortexConfig {
   /** Handoff Protocol: auto-prepend a structured context block to spawn prompts. */
   handoff?: { enabled: boolean }
   /** Inter-agent task board (rooms only; cards, dependencies, comments). */
-  board?: { enabled: boolean }
+  board?: { enabled: boolean; autoNotify?: boolean }
+  /**
+   * I-02: when true, destructive mutations (delete / archive / update of
+   * existing entries) route through a two-step confirm-token path, the same
+   * mechanism memory-delete already uses. Additive writes (todo_add, log_append,
+   * room_post) stay agent-callable so productive work is not blocked.
+   * Default false = current behavior (agent-callable).
+   */
+  mutate?: { confirmRequired: boolean }
 }
 
 /** Fully-defaulted config as modules see it. `injectLabel` is the P1 header. */

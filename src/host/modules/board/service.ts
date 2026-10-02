@@ -18,6 +18,12 @@ type Args = Record<string, unknown>
 /** How many comments are surfaced per card in a board.get response. */
 export const COMMENT_PAGE = 50
 
+/** How many dependency hops one unblock cascade may follow (cycle backstop). */
+export const UNBLOCK_MAX_DEPTH = 5
+
+/** Author label stamped on machine-written unblock comments (P1: honest origin). */
+export const UNBLOCK_AUTHOR = 'dsh-cortex:board'
+
 export interface BoardOutcome {
   ok: boolean
   message: string
@@ -29,6 +35,8 @@ export interface CardOutcome {
   ok: boolean
   message: string
   card?: BoardCard
+  /** D-02: cards this move unblocked (cascade), when `board.autoNotify` is on. */
+  unblocked?: string[]
 }
 
 export interface CommentOutcome {
@@ -78,6 +86,23 @@ export class BoardService {
   get enabled(): boolean {
     return this.deps.cfg().board?.enabled === true
   }
+
+  /**
+   * D-02 `board.autoNotify`: default OFF (P3). When true, moving a card to
+   * `done` cascades: every card that DEPENDS on it moves `backlog -> in-progress`
+   * with a machine-authored comment naming what unblocked it.
+   *
+   * The cascade is what makes `card.dependencies` mean something. Stored but
+   * never read, a dependency was a note to self; a silent stall (A done, B
+   * waiting, nobody told B) is the most common multi-agent failure. Gating it
+   * keeps today's behavior for existing rooms.
+   */
+  get autoNotify(): boolean {
+    return this.deps.cfg().board?.autoNotify === true
+  }
+
+  /** I-02: expose config reader so tools can query mutate.confirmRequired. */
+  get cfg(): ModuleDeps['cfg'] { return this.deps.cfg }
 
   /** Caller's session id (from the agent handle), or undefined for headless/UI paths. */
   ownSessionId(agent?: HostAgent): string | undefined {
@@ -203,7 +228,64 @@ export class BoardService {
     if (!updated.ok || updated.data === null || updated.data === undefined) {
       return cardRefused(`could not move card ${cardId}: ${updated.error ?? 'unknown'}`)
     }
-    return { ok: true, message: `card ${cardId} moved to ${status}`, card: updated.data }
+    // D-02: finishing a card releases the cards that were waiting on it. Off by
+    // default (`board.autoNotify`), so an existing board behaves exactly as
+    // before until the operator opts in.
+    if (status !== 'done' || !this.autoNotify) {
+      return { ok: true, message: `card ${cardId} moved to ${status}`, card: updated.data }
+    }
+    const unblocked = await this.unblockDependents(roomId, boardId, cardId)
+    const message = unblocked.length === 0
+      ? `card ${cardId} moved to ${status}`
+      : `card ${cardId} moved to ${status}; unblocked ${String(unblocked.length)} dependent card(s): ${unblocked.join(', ')}`
+    return { ok: true, message, card: updated.data, unblocked }
+  }
+
+  /**
+   * Move every `backlog` card that depends on `doneCardId` to `in-progress` and
+   * leave a machine-authored comment naming the cause.
+   *
+   * Two deliberate limits:
+   *  - a card already in `in-progress` or `done` is NOT touched. Unblocking is
+   *    about releasing work nobody has started; re-asserting a status on a
+   *    card an agent is actively working would fight the agent.
+   *  - the cascade is NOT recursive. Chained dependencies resolve over several
+   *    human or agent moves instead, which keeps the write set of one move
+   *    finite and its side effects visible in the comment thread. A cycle among
+   *    `dependencies` therefore terminates instead of looping.
+   */
+  private async unblockDependents(roomId: string, boardId: string, doneCardId: string): Promise<string[]> {
+    const cards = await this.deps.store.listCards(roomId, boardId)
+    if (!cards.ok) {
+      this.deps.warn(`board: could not read cards for unblock scan: ${neutralize(cards.error ?? 'unknown')}`)
+      return []
+    }
+    const unblocked: string[] = []
+    for (const dependent of cards.data) {
+      if (dependent.id === doneCardId) continue
+      if (dependent.status !== 'backlog') continue
+      if (!(dependent.dependencies ?? []).includes(doneCardId)) continue
+      const moved = await this.deps.store.updateCard(roomId, boardId, dependent.id, { status: 'in-progress' })
+      if (!moved.ok || moved.data === null || moved.data === undefined) {
+        this.deps.warn(`board: could not unblock card ${dependent.id}: ${neutralize(moved.error ?? 'unknown')}`)
+        continue
+      }
+      const comment = await this.deps.store.addComment({
+        roomId,
+        boardId,
+        cardId: dependent.id,
+        text: `unblocked: card ${doneCardId} reached done, and this card was waiting on it`,
+        authorSessionId: UNBLOCK_AUTHOR,
+        authorLabel: UNBLOCK_AUTHOR,
+      })
+      if (!comment.ok) {
+        // The status move already landed; a failed note must not undo it, but
+        // the loss has to be visible rather than silent.
+        this.deps.warn(`board: card ${dependent.id} unblocked but its note could not be written: ${neutralize(comment.error ?? 'unknown')}`)
+      }
+      unblocked.push(dependent.id)
+    }
+    return unblocked.slice(0, UNBLOCK_MAX_DEPTH * 10)
   }
 
   async setOwner(roomId: string, boardId: string, cardId: string, ownerId: string): Promise<CardOutcome> {
