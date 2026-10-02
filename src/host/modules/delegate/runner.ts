@@ -145,31 +145,51 @@ export class StreamSink {
    * .dev/flake2/prec-28.log). A push that arrives during the in-flight write
    * re-marks the buffer dirty, so the awaited flush then writes it too — no
    * lost data, and no second caller can observe a half-finished file.
+   *
+   * LOOP, NOT A ONE-SHOT AWAIT (race (b), audit .dev/audit-2026-10-02.md §8):
+   * capturing `pending` once is not enough. While we wait for write W1 another
+   * flush may resume first, start a NEWER write W2 and clear `dirty` — the old
+   * shape then returned the moment its captured W1 finished, with W2 still
+   * running, and `settle()` (flushAll) resolved on a stdout file that had not
+   * landed. Re-reading `inflight` after every await closes that window: this
+   * resolves only when nothing is in flight. `force` (the settle path) then
+   * loops once more so a push that arrived during its own write is written
+   * before it resolves; a non-forced flush falls into the throttle and returns,
+   * leaving the buffer for the next pump flush as before.
    */
   async flush(force = false): Promise<void> {
-    const pending = this.inflight
-    if (pending !== null) await pending
-    if (!this.dirty) return
-    const now = Date.now()
-    if (!force && now - this.lastFlushMs < this.flushIntervalMs) return
-    this.dirty = false
-    this.lastFlushMs = now
-    const write = (async (): Promise<void> => {
-      try {
-        // `content()` is read synchronously, before persist's first await, so
-        // the bytes of a write cannot mix with a later push.
-        const written = await this.persist(this.file, this.content())
-        if (!written.ok) throw new Error(written.error ?? 'stream persist refused')
-      } catch {
-        // Disk trouble must not kill the child; the final flush or a warn in
-        // the service reports it. Swallowing HERE is the only quiet spot.
+    for (;;) {
+      const pending = this.inflight
+      if (pending !== null) {
+        await pending
+        continue
       }
-    })()
-    this.inflight = write
-    try {
-      await write
-    } finally {
-      if (this.inflight === write) this.inflight = null
+      if (!this.dirty) return
+      const now = Date.now()
+      if (!force && now - this.lastFlushMs < this.flushIntervalMs) return
+      this.dirty = false
+      this.lastFlushMs = now
+      const write = (async (): Promise<void> => {
+        try {
+          // `content()` is read synchronously, before persist's first await, so
+          // the bytes of a write cannot mix with a later push.
+          const written = await this.persist(this.file, this.content())
+          if (!written.ok) throw new Error(written.error ?? 'stream persist refused')
+        } catch {
+          // Disk trouble must not kill the child; the final flush or a warn in
+          // the service reports it. Swallowing HERE is the only quiet spot.
+        }
+      })()
+      this.inflight = write
+      try {
+        await write
+      } finally {
+        if (this.inflight === write) this.inflight = null
+      }
+      // Top of the loop: re-check `inflight` (a newer write may have started
+      // while ours ran) and, for `force`, re-check `dirty` (a push during our
+      // own write). The throttle rejects a non-forced flush here, so it only
+      // ever performs one write per call, exactly as before.
     }
   }
 }

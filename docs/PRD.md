@@ -256,7 +256,7 @@ pid = sha256(normalize(remoteUrl || realpath(cwd)))[0:16]
 | `cortex_memory_restore` | Restore archived entry |
 | `cortex_memory_delete` | Two-step delete (id + confirm token) |
 | `cortex_memory_update` | Update content/importance/tags/branches |
-| `cortex_pending_list` | List pending approvals |
+| `cortex_pending_list` | List pending approvals **(DITANCANG, belum implement)** |
 
 **Todos & Logs (7 tools)**
 | Tool | Description |
@@ -302,7 +302,7 @@ pid = sha256(normalize(remoteUrl || realpath(cwd)))[0:16]
 **Admin (2 tools)**
 | Tool | Description |
 |---|---|
-| `cortex_pending_reject` | Reject proposal |
+| `cortex_pending_reject` | Reject proposal **(DITANCANG, belum implement)** |
 | `cortex_purge` | Delete all state (requires exact confirm string) |
 | `cortex_status` | Health report |
 

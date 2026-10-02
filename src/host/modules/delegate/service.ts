@@ -461,29 +461,30 @@ export class DelegateService {
 
     // For a non-succeeded job the write-back note is deterministic and known
     // now, so it is pushed BEFORE the first write: result.md on disk is complete
-    // in one shot. The succeeded path cannot do this because writeBack() must
-    // run after the terminal patch (see below), and its notes only exist after
-    // that call returns — that path still writes the file a second time.
+    // in one shot. The succeeded path composes its write-back notes before that
+    // second write (see below), so BOTH paths finish result.md before the
+    // terminal patch below ever lands.
     if (status !== 'succeeded') {
       lines.push('', '## write-back', `- skipped: the job did not succeed (${terminalStatus}). Streams and this result stay on disk.`)
     }
 
-    // The DISPOSITION half of result.md lands BEFORE job.json goes terminal,
-    // so no reader can ever observe `dead-letter` in job.json next to a
-    // result.md that still describes an earlier attempt. Previously the status
-    // patch was written first and result.md two awaits later, which left a
-    // real window (reproduced: test "result.md states the FINAL disposition"
-    // reading a result.md that said `attempt: 2 of 3` while job.json already
-    // said dead-letter). When the job SUCCEEDED this write is the honest
-    // prefix; the file is completed after writeBack runs post-patch.
+    // result.md always lands BEFORE job.json goes terminal, so no reader can
+    // ever observe `dead-letter` (or `succeeded`) in job.json next to a
+    // result.md that is missing a section. Previously the status patch was
+    // written first and result.md two awaits later, which left a real window
+    // (reproduced: test "result.md states the FINAL disposition" reading a
+    // result.md that said `attempt: 2 of 3` while job.json already said
+    // dead-letter). For the SUCCEEDED path this first write is the disposition
+    // half; the file is completed one block below, still BEFORE the terminal
+    // patch (race (a) fix, audit .dev/audit-2026-10-02.md §8).
     //
-    // CRASH TRADE-OFF (intentional, accepted): a crash between this write and
-    // the terminal job.json patch leaves a job whose result.md is final but
-    // whose status is still `running`; boot recovery marks it `lost` via
-    // sweepOrphans rather than leaving a hung `running` corpse. This NARROWS
-    // the exposure — the old order exposed the whole write-back sequence
-    // between the status patch and the artifact, and the write-back still
-    // runs strictly after the terminal patch, so its crash-safety is intact.
+    // CRASH TRADE-OFF (intentional, accepted): a crash between either result.md
+    // write and the terminal job.json patch leaves a job whose result.md is
+    // final but whose status is still `running`; boot recovery marks it
+    // `lost` via sweepOrphans rather than leaving a hung `running` corpse.
+    // The write-back sequence itself runs BEFORE the terminal patch, so a crash
+    // there only widens this narrow lost-job window; it can never leave a
+    // terminal job whose side-effects are half done and unrecorded.
     try {
       const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
       if (!written.ok) throw new Error(written.error)
@@ -491,9 +492,32 @@ export class DelegateService {
       this.deps.warn(`delegate: result.md write failed for ${job.id}: ${errorMessage(error)}`)
     }
 
-    // Terminal status SECOND: still before any side-effecting write-back, so
-    // a crash mid-write-back can never leave a 'running' corpse behind a
-    // completed job.
+    // For the succeeded path, complete result.md BEFORE the terminal patch.
+    // That closes the observable race (a): no reader can see a terminal
+    // job.json next to a result.md missing the "## write-back" section.
+    // Crash trade-off (same narrow shape as the non-succeeded path): a crash
+    // between this second write and the terminal patch leaves a job whose
+    // result.md is final but whose status is still `running`; boot recovery
+    // marks it `lost` via sweepOrphans. The alternative — terminal patch
+    // first, then write-back — is worse for crash safety because a crash
+    // mid-write-back would leave a 'succeeded' job whose write-back
+    // annotations are missing entirely.
+    if (status === 'succeeded') {
+      const notes = await this.writeBack({ ...job, finishedAt, exitCode: outcome.exitCode }, summary)
+      lines.push('', '## write-back', ...notes.map(note => `- ${note}`))
+      try {
+        const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
+        if (!written.ok) throw new Error(written.error)
+      } catch (error) {
+        this.deps.warn(`delegate: result.md write-back section failed for ${job.id}: ${errorMessage(error)}`)
+      }
+    }
+    // Non-succeeded: its write-back note was pushed before the first write, so
+    // nothing changes and the file is not written twice.
+
+    // Terminal status LAST: only after result.md is complete and write-back
+    // (if any) has fired, so no reader can observe the authoritative terminal
+    // state while the artifact is still a partial disposition.
     //
     // A job that WILL retry must not pass through a terminal status at all, and
     // must be recorded as queued exactly ONCE: the single write below is both
@@ -529,24 +553,6 @@ export class DelegateService {
         // A success clears the stale failure reason; anything else records it.
         ...(status === 'succeeded' ? { lastError: undefined } : { lastError: failureReason }),
       })
-    }
-
-    let completed = false
-    if (status === 'succeeded') {
-      const notes = await this.writeBack({ ...job, finishedAt, exitCode: outcome.exitCode }, summary)
-      lines.push('', '## write-back', ...notes.map(note => `- ${note}`))
-      completed = true
-    }
-    // Non-succeeded: its write-back note was pushed before the first write, so
-    // nothing changes and the file is not written twice.
-
-    if (completed) {
-      try {
-        const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
-        if (!written.ok) throw new Error(written.error)
-      } catch (error) {
-        this.deps.warn(`delegate: result.md write-back section failed for ${job.id}: ${errorMessage(error)}`)
-      }
     }
 
     // --- auto-retry + dead-letter scheduling ---

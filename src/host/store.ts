@@ -130,6 +130,13 @@ function sanitizeProposal(p: PendingItem['proposal']): PendingItem['proposal'] {
   return out
 }
 
+/** Effective page size for every store listing: never below 1, never above LIST_CAP. */
+export function clampListLimit(requested: number | undefined): number {
+  if (requested === undefined) return LIST_CAP
+  if (!Number.isFinite(requested)) return LIST_CAP
+  return Math.max(1, Math.min(Math.floor(requested), LIST_CAP))
+}
+
 /**
  * File-backed store; the only writer inside the state root (P5).
  * Every public method returns a `StoreResult` envelope and never throws: reads
@@ -307,7 +314,11 @@ export class CortexStore {
       const scopes: Scope[] = filter.track === undefined
         ? [{ track: 'user' }, { track: 'global' }, ...(filter.pid ? [{ track: 'project' as const, pid: filter.pid }] : [])]
         : [filter.track === 'project' ? { track: 'project', pid: filter.pid } : { track: filter.track }]
-      const limit = filter.limit ?? LIST_CAP
+      // Clamp at the store, not only at the tool layer: `listEntries` is public
+      // and is also called directly (delegate/service, decisions/service,
+      // memory/render), so an unclamped limit would reach `listDir` and size
+      // `readdir` by the caller's number instead of LIST_CAP.
+      const limit = clampListLimit(filter.limit)
       const found: Entry[] = []
       let truncated = false
       for (const scope of scopes) {

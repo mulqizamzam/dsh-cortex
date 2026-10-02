@@ -138,7 +138,7 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
 - `result.md` adalah artefak yang boleh dibaca manusia, jadi WAJIB konsisten dengan `job.json`: header, baris `attempt:`, dan blok `## auto-retry` / `## dead-letter` ditulis SESUDAH disposisi akhir diputuskan (bukti cacat: job `31e83e1407dc` live ter-dead-letter di `job.json` sementara `result.md` masih menulis `— failed` polos).
 
 **Pendukung**
-- `cortex_pending_list {}` / `cortex_pending_reject {id}`; approve utama lewat UI (the Cortex panel).
+- ~~`cortex_pending_list {}` / `cortex_pending_reject {id}`~~ — DITANCANG tapi **belum diimplementasikan**. Approve/reject proposal utama lewat UI (the Cortex panel) saja yang tersedia.
 - `cortex_purge {scope:"all", confirm:"DELETE-CORTEX-DATA"}` → hapus state root; satu-satunya operasi destruktif, wajib string konfirmasi persis.
 
 ## 5. Permukaan UI (client)

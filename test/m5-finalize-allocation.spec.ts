@@ -17,6 +17,11 @@
  * representative 1 MiB stdout. clampText is NOT modified.
  */
 import { describe, expect, it } from 'vitest'
+
+// The BENCH tests allocate 1 MiB of output and run multiple iterations of
+// string processing (neutralize, summarize, clamp). Full-suite parallel run
+// pushes this past the default 20 s timeout, so we widen it here only.
+const BENCH_TIMEOUT_MS = 60_000
 import { clampText, DEFAULT_CAPS } from '../src/lib/caps.ts'
 import { neutralize } from '../src/lib/sanitize.ts'
 import { summarize } from '../src/host/modules/delegate/service.ts'
@@ -63,7 +68,7 @@ function measure(rounds: number, work: () => void): Measurement {
 }
 
 describe('M5 finalize allocation profile (body composition only)', () => {
-  it('BENCH: each step of the current composition, on a 1 MiB body', () => {
+  it('BENCH: each step of the current composition, on a 1 MiB body', { timeout: BENCH_TIMEOUT_MS }, () => {
     const clean = body()
     const braced = body({ braces: true })
 
@@ -88,7 +93,7 @@ describe('M5 finalize allocation profile (body composition only)', () => {
     expect(bytesOf(clean)).toBe(CAP)
   })
 
-  it('BENCH: whole composition today vs a tail-first composition', () => {
+  it('BENCH: whole composition today vs a tail-first composition', { timeout: BENCH_TIMEOUT_MS }, () => {
     const clean = body()
     const searchChars = DEFAULT_CAPS.searchResultChars
 
@@ -128,7 +133,7 @@ describe('M5 finalize allocation profile (body composition only)', () => {
     expect(summarize(head, undefined), 'summarize of a bounded head equals summarize of the whole body').toBe(summarize(clean, undefined))
   })
 
-  it('BENCH GC pressure: legacy composition vs shipped, same run', async () => {
+  it('BENCH GC pressure: legacy composition vs shipped, same run', { timeout: BENCH_TIMEOUT_MS }, async () => {
     const { PerformanceObserver } = await import('node:perf_hooks')
     const { clampText: cap, DEFAULT_CAPS: caps } = await import('../src/lib/caps.ts')
     const { neutralize: shippedNeutralize } = await import('../src/lib/sanitize.ts')

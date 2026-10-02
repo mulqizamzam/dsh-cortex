@@ -293,10 +293,20 @@ describe('delegate · echo fixture end to end', () => {
 
       const out = await callTool(h, 'cortex_delegate', { runner: 'echoFile', task: 'Summarize the attached notes', includeMemory: true, roomId }, agent)
       const jobId = String((out.job as { id: string }).id)
-      const done = await until('job succeeded with result.md written', async () => {
+      // Wait until result.md contains the write-back marker, not just its
+      // first disposition write. The service writes result.md BEFORE the
+      // terminal job.json patch (P4 crash-safety) and again AFTER writeBack()
+      // completes, so the file can exist without "## write-back" for a short
+      // window. The second write is what we actually assert on.
+      const done = await until('job succeeded with final result.md written', async () => {
         const job = await h.svc.getJob(jobId)
         if (job?.status !== 'succeeded') return null
-        return (await h.svc.readResultFile(jobId)) !== null ? job : null
+        const content = (await h.svc.readResultFile(jobId)) ?? ''
+        if (!content) return null
+        // The succeeded path writes the "## write-back" section in a second
+        // write after writeBack() (which runs logAppend, addPending, postMessage).
+        if (job.id === undefined || !content.includes('## write-back')) return null
+        return job
       })
       expect(done.exitCode).toBe(0)
       expect(done.cwd).toBe(h.root)

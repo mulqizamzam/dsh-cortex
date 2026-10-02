@@ -5,10 +5,12 @@ library, and guarded external-CLI delegation for DeepSeek Harness — as one pur
 plugin. No core modifications, one disposable state directory.
 
 > **Status: v0.1.0 — implementation complete.** Build clean, full suite green
-> (493 passed / 1 skipped, 32 files), all unit/security gates (G1–G9, G14, G16) and
+> (786 passed / 1 skipped, 62 files), all unit/security gates (G1–G9, G14, G16) and
 > the isolated-install + uninstall + boot-resilience e2e (G3/G4/G4b/G5/G7) verified on
-> a throwaway `DSH_HOME` (2026-09-15). Live install into the **active** web profile is
-> NOT done — it needs an explicit operator GO (HIGH-risk; see `.local-link.md` §6).
+> a throwaway `DSH_HOME` (2026-09-15). **Live install into the active web profile is
+> DONE** — the plugin is `link:`-mounted into `$DSH_HOME/profiles/web/node_modules/dsh-cortex`
+> and reports 13/13 modules ready via `cortex_status` (verified 2026-10-02).
+> Official completion label: **VERIFIED FOR TESTED SCOPE**.
 
 ## What it does
 
@@ -116,7 +118,7 @@ checklist after a real restart]`
 
 `DESIGN.md` (product contract, constraints P1–P9), `docs/HOST-API.md` (verified host
 API notes incl. crash-traps), `docs/TEST-PLAN.md` (G1–G16 gate ledger), `.dev/`
-(recon reports + RPC endpoint contract + snapshots). Tests: `pnpm run verify`.
+(recon reports + RPC endpoint contract + snapshots). Tests: `pnpm run test`.
 
 ## Changelog
 
