@@ -459,9 +459,41 @@ export class DelegateService {
       lines.push('', '## dead-letter', `- this job used all ${String(maxRetries)} automatic retries without succeeding. It is parked in the dead-letter queue for a human decision; re-dispatch it from the Cortex panel (Jobs tab) or with cortex_delegate_retry.`)
     }
 
-    // Terminal status FIRST: job.json must be authoritative before any
-    // side-effecting write-back runs, so a crash mid-write-back can never
-    // leave a 'running' corpse behind a completed job.
+    // For a non-succeeded job the write-back note is deterministic and known
+    // now, so it is pushed BEFORE the first write: result.md on disk is complete
+    // in one shot. The succeeded path cannot do this because writeBack() must
+    // run after the terminal patch (see below), and its notes only exist after
+    // that call returns — that path still writes the file a second time.
+    if (status !== 'succeeded') {
+      lines.push('', '## write-back', `- skipped: the job did not succeed (${terminalStatus}). Streams and this result stay on disk.`)
+    }
+
+    // The DISPOSITION half of result.md lands BEFORE job.json goes terminal,
+    // so no reader can ever observe `dead-letter` in job.json next to a
+    // result.md that still describes an earlier attempt. Previously the status
+    // patch was written first and result.md two awaits later, which left a
+    // real window (reproduced: test "result.md states the FINAL disposition"
+    // reading a result.md that said `attempt: 2 of 3` while job.json already
+    // said dead-letter). When the job SUCCEEDED this write is the honest
+    // prefix; the file is completed after writeBack runs post-patch.
+    //
+    // CRASH TRADE-OFF (intentional, accepted): a crash between this write and
+    // the terminal job.json patch leaves a job whose result.md is final but
+    // whose status is still `running`; boot recovery marks it `lost` via
+    // sweepOrphans rather than leaving a hung `running` corpse. This NARROWS
+    // the exposure — the old order exposed the whole write-back sequence
+    // between the status patch and the artifact, and the write-back still
+    // runs strictly after the terminal patch, so its crash-safety is intact.
+    try {
+      const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
+      if (!written.ok) throw new Error(written.error)
+    } catch (error) {
+      this.deps.warn(`delegate: result.md write failed for ${job.id}: ${errorMessage(error)}`)
+    }
+
+    // Terminal status SECOND: still before any side-effecting write-back, so
+    // a crash mid-write-back can never leave a 'running' corpse behind a
+    // completed job.
     //
     // A job that WILL retry must not pass through a terminal status at all, and
     // must be recorded as queued exactly ONCE: the single write below is both
@@ -499,18 +531,22 @@ export class DelegateService {
       })
     }
 
+    let completed = false
     if (status === 'succeeded') {
       const notes = await this.writeBack({ ...job, finishedAt, exitCode: outcome.exitCode }, summary)
       lines.push('', '## write-back', ...notes.map(note => `- ${note}`))
-    } else {
-      lines.push('', '## write-back', `- skipped: the job did not succeed (${terminalStatus}). Streams and this result stay on disk.`)
+      completed = true
     }
+    // Non-succeeded: its write-back note was pushed before the first write, so
+    // nothing changes and the file is not written twice.
 
-    try {
-      const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
-      if (!written.ok) throw new Error(written.error)
-    } catch (error) {
-      this.deps.warn(`delegate: result.md write failed for ${job.id}: ${errorMessage(error)}`)
+    if (completed) {
+      try {
+        const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
+        if (!written.ok) throw new Error(written.error)
+      } catch (error) {
+        this.deps.warn(`delegate: result.md write-back section failed for ${job.id}: ${errorMessage(error)}`)
+      }
     }
 
     // --- auto-retry + dead-letter scheduling ---

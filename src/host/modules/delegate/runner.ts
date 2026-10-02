@@ -77,6 +77,8 @@ export class StreamSink {
   private overflowed = false
   private dirty = false
   private lastFlushMs = 0
+  /** The persist write currently running, if any (M5 race B). */
+  private inflight: Promise<void> | null = null
   private readonly flushIntervalMs: number
 
   constructor(
@@ -132,19 +134,42 @@ export class StreamSink {
     return this.overflowed ? HEAD_DROPPED + body : body
   }
 
-  /** Persist when the throttle allows; force always writes when dirty. */
+  /**
+   * Persist when the throttle allows; force always writes when dirty.
+   *
+   * Completion means the file is ON DISK, so a write already in flight is
+   * awaited first. The old shape cleared `dirty` at the start of the write and
+   * returned for the settle call while that write was still pending, so
+   * `finalize` could compose result.md from a stdout file that had not landed
+   * yet (reproduced on PRE-M5 code: result.md reporting "stdout was empty",
+   * .dev/flake2/prec-28.log). A push that arrives during the in-flight write
+   * re-marks the buffer dirty, so the awaited flush then writes it too — no
+   * lost data, and no second caller can observe a half-finished file.
+   */
   async flush(force = false): Promise<void> {
+    const pending = this.inflight
+    if (pending !== null) await pending
     if (!this.dirty) return
     const now = Date.now()
     if (!force && now - this.lastFlushMs < this.flushIntervalMs) return
     this.dirty = false
     this.lastFlushMs = now
+    const write = (async (): Promise<void> => {
+      try {
+        // `content()` is read synchronously, before persist's first await, so
+        // the bytes of a write cannot mix with a later push.
+        const written = await this.persist(this.file, this.content())
+        if (!written.ok) throw new Error(written.error ?? 'stream persist refused')
+      } catch {
+        // Disk trouble must not kill the child; the final flush or a warn in
+        // the service reports it. Swallowing HERE is the only quiet spot.
+      }
+    })()
+    this.inflight = write
     try {
-      const written = await this.persist(this.file, this.content())
-      if (!written.ok) throw new Error(written.error ?? 'stream persist refused')
-    } catch {
-      // Disk trouble must not kill the child; the final flush or a warn in
-      // the service reports it. Swallowing HERE is the only quiet spot.
+      await write
+    } finally {
+      if (this.inflight === write) this.inflight = null
     }
   }
 }
