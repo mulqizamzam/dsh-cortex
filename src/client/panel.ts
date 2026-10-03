@@ -141,8 +141,37 @@ const FILTERS: ReadonlyArray<{ id: MemoryFilter; label: string }> = [
   { id: 'archived', label: 'archived' },
 ]
 
-function memoryRow(entry: MemoryEntry, model: PanelModel, busyId: string | null): ReactNode {
+function memoryRow(entry: MemoryEntry, model: PanelModel, state: PanelState['memory']): ReactNode {
+  const { busyId, confirmDeleteId } = state
   const archived = entry.archivedAt !== undefined && entry.archivedAt !== null && entry.archivedAt !== ''
+  const confirming = confirmDeleteId === entry.id
+  const actions: ReactNode[] = []
+  if (confirming) {
+    // Destructive arming state: the entry is named, the promise is short, and
+    // Cancel is the same distance from the button as Confirm.
+    actions.push(muted('delete permanently? not reversible'))
+    actions.push(button('Confirm', () => void model.deleteMemory(entry.id), {
+      disabled: busyId === entry.id,
+      kind: 'danger',
+      title: 'memory.delete — permanently removes this entry',
+    }))
+    actions.push(button('Cancel', () => model.cancelDelete(), {
+      kind: 'ghost',
+      title: 'leave the entry alone',
+    }))
+  } else {
+    actions.push(button(archived ? 'Restore' : 'Archive', () => void (archived ? model.restoreMemory(entry.id) : model.archiveMemory(entry.id)), {
+      disabled: busyId === entry.id,
+      title: archived ? 'move this entry back to the live track' : 'move this entry to the archive',
+    }))
+    if (!archived) {
+      actions.push(button('Delete', () => void model.deleteMemory(entry.id), {
+        disabled: busyId === entry.id,
+        kind: 'danger',
+        title: 'ask first, then memory.delete — this cannot be undone',
+      }))
+    }
+  }
   return h(
     'div',
     { className: 'cx-entry', style: S.card, key: entry.id, 'data-entry': entry.id },
@@ -163,10 +192,7 @@ function memoryRow(entry: MemoryEntry, model: PanelModel, busyId: string | null)
       muted(entry.origin ?? 'no origin'),
       muted(entry.updatedAt),
       h('span', { style: { flex: '1 1 auto' } }),
-      button(archived ? 'Restore' : 'Archive', () => void (archived ? model.restoreMemory(entry.id) : model.archiveMemory(entry.id)), {
-        disabled: busyId === entry.id,
-        title: archived ? 'move this entry back to the live track' : 'move this entry to the archive',
-      }),
+      ...actions,
     ),
   )
 }
@@ -264,7 +290,7 @@ export function MemoryTab(props: { state: PanelState['memory']; model: PanelMode
           : h(
               'div',
               { className: 'cx-entries' },
-              ...entries.map(entry => memoryRow(entry, model, state.busyId)),
+              ...entries.map(entry => memoryRow(entry, model, state)),
             ),
       retry,
       'memory.list',

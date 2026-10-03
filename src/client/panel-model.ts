@@ -73,6 +73,8 @@ export interface MemoryState {
   filter: MemoryFilter
   query: string
   busyId: string | null
+  /** ID of the entry whose deletion is pending user confirmation. */
+  confirmDeleteId: string | null
 }
 
 export interface TodoState {
@@ -170,6 +172,9 @@ export interface PanelModel {
   runMemorySearch(): Promise<void>
   archiveMemory(id: string): Promise<void>
   restoreMemory(id: string): Promise<void>
+  /** Request deletion — second call with the same id confirms it. */
+  deleteMemory(id: string): Promise<void>
+  cancelDelete(): void
   approvePending(id: string): Promise<void>
   rejectPending(id: string): Promise<void>
 
@@ -245,6 +250,7 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
       filter: 'all',
       query: '',
       busyId: null,
+      confirmDeleteId: null,
     },
     todo: { list: { kind: 'idle' }, openOnly: true, busyId: null, track: 'project', draft: '' },
     rooms: {
@@ -343,6 +349,28 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
 
   async function restoreMemory(id: string): Promise<void> {
     await setEntryBusy(id, () => api.memoryRestore(id), 'restored')
+  }
+
+  async function deleteMemory(id: string): Promise<void> {
+    if (state.memory.confirmDeleteId !== id) {
+      // First click: arm the confirmation state so the UI can show the confirm bar.
+      patch({ memory: { ...state.memory, confirmDeleteId: id } })
+      return
+    }
+    // Second click: the confirm button fires — call the API to delete.
+    patch({ memory: { ...state.memory, busyId: id, confirmDeleteId: null } })
+    const result = await api.memoryDelete(id)
+    patch({ memory: { ...state.memory, busyId: null } })
+    if (result.ok === false) {
+      flash('error', result.error.message)
+      return
+    }
+    flash('ok', `deleted ${id}`)
+    await loadMemory()
+  }
+
+  function cancelDelete(): void {
+    patch({ memory: { ...state.memory, confirmDeleteId: null } })
   }
 
   async function setEntryBusy(id: string, action: () => Promise<CortexResult<ActionResult>>, verb: string): Promise<void> {
@@ -802,6 +830,8 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     runMemorySearch: () => busy(runMemorySearch),
     archiveMemory: id => busy(() => archiveMemory(id)),
     restoreMemory: id => busy(() => restoreMemory(id)),
+    deleteMemory: id => busy(() => deleteMemory(id)),
+    cancelDelete,
     approvePending: id => busy(() => decidePending(id, 'approve')),
     rejectPending: id => busy(() => decidePending(id, 'reject')),
 
