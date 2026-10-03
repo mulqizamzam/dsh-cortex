@@ -335,7 +335,7 @@ describe('prompts wiring and by-kind approval (B3/B4)', () => {
 
   it('registers the prompts tools and endpoints (B3)', async () => {
     const { fake } = await bootWithStore()
-    for (const tool of ['cortex_prompt_list', 'cortex_prompt_get', 'cortex_prompt_save', 'cortex_prompt_toggle', 'cortex_prompt_inject']) {
+    for (const tool of ['cortex_prompt_list', 'cortex_prompt_get', 'cortex_prompt_save', 'cortex_pending_list', 'cortex_pending_reject', 'cortex_prompt_delete', 'cortex_prompt_toggle', 'cortex_prompt_inject']) {
       expect(fake.tools.has(tool), tool).toBe(true)
     }
     const listed = await channel(fake, CORTEX_READ_CHANNEL)('prompts.list', {}) as { ok: boolean }
@@ -430,7 +430,7 @@ describe('failed-module endpoints and status tool accuracy (F5/F6)', () => {
     const modules = modulesOf(await statusPayload(fake))
     expect(modules.find(module => module.name === 'status')?.tools).toEqual(['cortex_status'])
     expect(modules.find(module => module.name === 'todo')?.tools).toHaveLength(4)
-    expect(modules.find(module => module.name === 'prompts')?.tools).toHaveLength(5)
+    expect(modules.find(module => module.name === 'prompts')?.tools).toHaveLength(8)
     for (const module of modules) {
       for (const tool of module.tools) expect(fake.tools.has(tool), tool).toBe(true)
     }

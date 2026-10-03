@@ -112,8 +112,10 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
 - `cortex_progress_report {}` → sintesis: open todos + N entri project terbaru + tail log hari ini.
 
 **Prompt**
-- `cortex_prompt_list {}` / `cortex_prompt_get {id}` / `cortex_prompt_save {title, body, category?}` (→ pending) / `cortex_prompt_toggle {id, enabled}`
+- `cortex_prompt_list {}` / `cortex_prompt_get {id}` / `cortex_prompt_save {title, body, category?}` (→ pending) / `cortex_prompt_toggle {id, enabled}` / `cortex_prompt_delete {id, confirm?}` (gated `mutate.confirmRequired`)
 - `cortex_prompt_inject {id, mode:"once|sticky|clear", targetSession?}` → tulis ke `inject/<sessionId>.json`; render di turn berikutnya dengan label jujur; `immediate` = lewat mekanisme steer/append bila host menyediakan (fallback:生效 turn berikutnya, jujur di output).
+- `cortex_pending_list {status?}` — daftar proposal yang menuggu keputusan manusia (P3). Model hanya bisa list/reject; approve tetap milik panel (kebijakan P3).
+- `cortex_pending_reject {id}` — tolak proposal; audit bar tetap ada dengan status `rejected`.
 
 **Room / multi-sesi**
 - `cortex_room_create {title}` / `cortex_room_list {}` / `cortex_room_join {roomId, sessionId?}`
@@ -138,7 +140,7 @@ Semua tool mengembalikan teks ringkas + id, bukan dump besar; error sebagai kali
 - `result.md` adalah artefak yang boleh dibaca manusia, jadi WAJIB konsisten dengan `job.json`: header, baris `attempt:`, dan blok `## auto-retry` / `## dead-letter` ditulis SESUDAH disposisi akhir diputuskan (bukti cacat: job `31e83e1407dc` live ter-dead-letter di `job.json` sementara `result.md` masih menulis `— failed` polos).
 
 **Pendukung**
-- ~~`cortex_pending_list {}` / `cortex_pending_reject {id}`~~ — DITANCANG tapi **belum diimplementasikan**. Approve/reject proposal utama lewat UI (the Cortex panel) saja yang tersedia.
+- ~~`cortex_pending_list {}` / `cortex_pending_reject {id}`~~ — **tutup 2026-10-03**. `cortex_prompt_delete` juga ada (desain ulang dari `cortex_pending_delete` B-01; library delete sudah ada via endpoint tapi belum ada tool AI). Approve/reject proposal utama lewat UI (the Cortex panel) saja yang tersedia.
 - `cortex_purge` → hapus state root; satu-satunya operasi destruktif. **Dua langkah (v0.2.0, D-03):** panggil tanpa `confirm` untuk dapat token sekali-pakai (TTL 5 menit), lalu panggil lagi dengan token itu. Literal lama `PURGE_ALL_CORTEX_STATE` ditahan/ditolak — bukan lagi bentuk konfirmasi. Mekanisme sama persis dengan `cortex_memory_delete` (`ConfirmTokens`).
 
 ## 5. Permukaan UI (client)

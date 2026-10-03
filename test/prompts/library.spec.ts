@@ -282,6 +282,17 @@ describe('the disabled gate names the key (P3)', () => {
       expect(out.status, name).toBe('refused')
       expect(String(out.message), name).toContain('prompts.enabled')
     }
+    // The pending helpers live in this module too, so they share the same P3
+    // kill-switch as the library tools. Nothing leaks state when the domain is
+    // switched off.
+    for (const name of ['cortex_pending_list', 'cortex_pending_reject']) {
+      const out = await runTool(harness.fake, name, { id: 'aa12345678bb' }, agent())
+      expect(out.status, name).toBe('refused')
+      expect(String(out.message), name).toContain('prompts.enabled')
+    }
+    const deleted = await runTool(harness.fake, 'cortex_prompt_delete', { id: 'aa12345678bb' }, agent())
+    expect(deleted.status).toBe('refused')
+    expect(String(deleted.message)).toContain('prompts.enabled')
     for (const endpoint of ['prompts.save', 'prompts.toggle', 'prompts.delete', 'inject.now']) {
       const call = await callEndpoint(promptsModule.writeEndpoints, endpoint, { id: 'aa12345678bb', title: 't', body: 'b', enabled: true, confirm: 'DELETE', targetSessionId: 's', mode: 'once', promptId: 'aa12345678bb' })
       expect(call.ok, endpoint).toBe(false)
@@ -372,8 +383,102 @@ describe('the read tools', () => {
   })
 })
 
+describe('the pending gate: what the AI can and cannot decide', () => {
+  it('cortex_pending_list returns the model-facing summary, not the body', async () => {
+    const row = await harness.store.addPending({ kind: 'prompt', proposal: { title: 'Pending title', body: 'full body text' }, reason: 'keep this', fromSessionId: 'agent-x' })
+    expect(row.ok).toBe(true)
+    if (!row.ok) return
+    const out = await runTool(harness.fake, 'cortex_pending_list', {}, agent())
+    expect(out.status).toBe('ok')
+    const items = out.items as Array<Record<string, unknown>>
+    expect(items).toHaveLength(1)
+    expect(items[0]?.id).toBe(row.data.id)
+    expect(items[0]?.kind).toBe('prompt')
+    expect(String(items[0]?.summary)).toContain('Pending title')
+    expect(String(items[0]?.summary)).toContain('chars')
+    // The raw body must not leak into the model-facing answer.
+    expect(JSON.stringify(out)).not.toContain('full body text')
+    expect(items[0]?.author).toBe('agent-x')
+    expect(typeof items[0]?.createdAt).toBe('string')
+  })
+
+  it('cortex_pending_list respects the status filter', async () => {
+    const a = await harness.store.addPending({ kind: 'prompt', proposal: { title: 'Pending one', body: 'a' } })
+    expect(a.ok).toBe(true)
+    if (!a.ok) return
+    await harness.store.rejectPending(a.data.id)
+    const pending = await runTool(harness.fake, 'cortex_pending_list', {}, agent())
+    expect((pending.items as unknown[])).toHaveLength(0)
+    const rejected = await runTool(harness.fake, 'cortex_pending_list', { status: 'rejected' }, agent())
+    expect((rejected.items as unknown[])).toHaveLength(1)
+    const approved = await runTool(harness.fake, 'cortex_pending_list', { status: 'approved' }, agent())
+    expect((approved.items as unknown[])).toHaveLength(0)
+  })
+
+  it('cortex_pending_reject marks the row rejected but keeps it as an audit trail', async () => {
+    const row = await harness.store.addPending({ kind: 'prompt', proposal: { title: 'Bad idea', body: 'drop this' } })
+    expect(row.ok).toBe(true)
+    if (!row.ok) return
+    const out = await runTool(harness.fake, 'cortex_pending_reject', { id: row.data.id }, agent())
+    expect(out.status).toBe('rejected')
+    expect(String(out.summary)).toContain('audit row is kept')
+    const reread = await harness.store.listPending({ status: 'rejected' })
+    expect(reread.ok).toBe(true)
+    expect((reread.ok ? reread.data : []).map(item => item.id)).toEqual([row.data.id])
+  })
+
+  it('cortex_pending_reject refuses an unknown or already-decided id', async () => {
+    const unknown = await runTool(harness.fake, 'cortex_pending_reject', { id: 'ffffffffffff' }, agent())
+    expect(unknown.status).toBe('not-found')
+    expect(String(unknown.message)).not.toContain('prompts.enabled')
+    const blank = await runTool(harness.fake, 'cortex_pending_reject', {}, agent())
+    expect(blank.status).toBe('refused')
+    expect(String(blank.message)).toContain('cortex_pending_list')
+  })
+
+  it('cortex_prompt_delete removes the row and drops queued injections', async () => {
+    const doc = await saveDoc(harness, { title: 'To be deleted', body: 'step 1, step 2' })
+    await runTool(harness.fake, 'cortex_prompt_inject', { promptId: doc.id, mode: 'once' }, agent())
+    const listed = await runTool(harness.fake, 'cortex_prompt_list', {}, agent())
+    expect(listed.count).toBe(1)
+    const out = await runTool(harness.fake, 'cortex_prompt_delete', { id: doc.id }, agent())
+    expect(out.status).toBe('deleted')
+    expect(String(out.message)).toContain('queued injections')
+    expect((await harness.svc.list()).map(item => item.id)).not.toContain(doc.id)
+    // The queue row for the deleted prompt is gone too.
+    expect(await harness.svc.queueFor(AGENT)).toHaveLength(0)
+  })
+
+  it('cortex_prompt_delete refuses an unknown id instead of pretending', async () => {
+    const out = await runTool(harness.fake, 'cortex_prompt_delete', { id: 'ffffffffffff' }, agent())
+    expect(out.status).toBe('refused')
+    expect(String(out.message)).toContain('no saved prompt')
+    expect(String(out.message)).not.toContain('prompts.enabled')
+  })
+
+  it('cortex_prompt_delete is two steps while mutate.confirmRequired is on', async () => {
+    harness.config.mutate = { confirmRequired: true }
+    const doc = await saveDoc(harness, { title: 'Gated', body: 'needs a token' })
+    // Step 1 names the operation and issues a token; nothing was deleted.
+    const first = await runTool(harness.fake, 'cortex_prompt_delete', { id: doc.id }, agent())
+    expect(first.status).toBe('confirm-required')
+    expect(typeof first.token).toBe('string')
+    expect((await harness.svc.get(doc.id))?.title).toBe('Gated')
+    // A wrong confirm string is refused, and still deletes nothing.
+    const wrong = await runTool(harness.fake, 'cortex_prompt_delete', { id: doc.id, confirm: 'nope' }, agent())
+    expect(wrong.status).toBe('refused')
+    expect((await harness.svc.get(doc.id))?.title).toBe('Gated')
+    // Step 2 with the issued token deletes exactly once; the token is single-use.
+    const second = await runTool(harness.fake, 'cortex_prompt_delete', { id: doc.id, confirm: first.token }, agent())
+    expect(second.status).toBe('deleted')
+    expect(await harness.svc.get(doc.id)).toBeNull()
+    const replay = await runTool(harness.fake, 'cortex_prompt_delete', { id: doc.id, confirm: first.token }, agent())
+    expect(replay.status).toBe('refused')
+  })
+})
+
 describe('registration hygiene', () => {
-  it('registers exactly the five tools named in TOOLS', () => {
+  it('registers exactly the eight tools named in TOOLS', () => {
     expect([...harness.fake.tools.keys()].sort()).toEqual([...promptsModule.TOOLS].sort())
   })
 
@@ -382,7 +487,7 @@ describe('registration hygiene', () => {
     // this module, so nothing collides and nothing throws (P4).
     expect(() => promptsModule.apply(harness.deps)).not.toThrow()
     expect(harness.fake.refused).toEqual([])
-    expect([...harness.fake.tools.keys()]).toHaveLength(5)
+    expect([...harness.fake.tools.keys()]).toHaveLength(8)
     expect(harness.fake.contexts).toHaveLength(1)
   })
 })

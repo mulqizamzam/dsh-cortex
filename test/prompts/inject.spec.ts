@@ -40,7 +40,7 @@ const render = () => renderPromptsContext(harness.fake, { agent: agent() })
 describe('module face', () => {
   it('exports the wiring contract and the frozen seam identity', () => {
     expect(promptsModule.name).toBe('prompts')
-    expect([...promptsModule.TOOLS]).toEqual(['cortex_prompt_list', 'cortex_prompt_get', 'cortex_prompt_save', 'cortex_prompt_toggle', 'cortex_prompt_inject'])
+    expect([...promptsModule.TOOLS]).toEqual(['cortex_prompt_list', 'cortex_prompt_get', 'cortex_prompt_save', 'cortex_pending_list', 'cortex_pending_reject', 'cortex_prompt_delete', 'cortex_prompt_toggle', 'cortex_prompt_inject'])
     expect(typeof promptsModule.apply).toBe('function')
     expect(harness.fake.contexts.map(entry => entry.name)).toEqual([PROMPTS_CONTEXT_NAME])
     expect(PROMPTS_CONTEXT_NAME).toBe('cortex:prompts')

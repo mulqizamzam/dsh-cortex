@@ -1,5 +1,5 @@
 /**
- * M4 · the five prompt tools (DESIGN §4).
+ * M4 · the eight prompt tools (DESIGN §4).
  *
  * Output shape follows the M2/M3 convention: a status token, one honest sentence,
  * and only as much data as a model needs — a listing reports `bodyChars`, not the
@@ -18,6 +18,7 @@
  *  - `cortex_prompt_inject` reaches the CALLING session's queue only
  *    (see `resolveAgentInjectTarget` in service.ts).
  */
+import { gateMutation } from '../mutate-gate.ts'
 import { JSON_OBJECT_OUTPUT, defineTool, text } from '../../dsh.ts'
 import type { ToolDefinition } from '../../dsh.ts'
 import { clampText } from '../../../lib/caps.ts'
@@ -196,5 +197,90 @@ export function promptTools(svc: PromptsService): ToolDefinition[] {
     },
   } as never)
 
-  return [list, get, save, toggle, inject]
+  const pendingList = defineTool({
+    name: 'cortex_pending_list',
+    description:
+      'List pending proposals awaiting a human decision. Every item in the output carries its id, kind, a model-facing summary, and who authored it — so the caller can pick the right id for reject or delete without guessing. The gate is read-only; nothing is decided here.',
+    parameters: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', enum: ['pending', 'approved', 'rejected'], description: 'Filter by decision status. Default is pending only.' },
+      },
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
+    execute: async (args: never, _execution: Execution) => {
+      if (!svc.enabled) return off()
+      const a = (args ?? {}) as Args
+      const status = a.status === 'pending' || a.status === 'approved' || a.status === 'rejected' ? a.status : 'pending'
+      const result = await svc.deps.store.listPending({ status })
+      if (!result.ok) return neutralizeDeep({ status: 'error', message: `could not read pending proposals: ${neutralize(result.error)}` })
+      const items = result.data ?? []
+      if (items.length === 0) return neutralizeDeep({ status: 'ok', items: [], summary: 'the proposal queue is empty' })
+      return neutralizeDeep({
+        status: 'ok',
+        statusFilter: status,
+        items: items.map(item => ({
+          id: item.id,
+          kind: item.kind,
+          summary: item.kind === 'prompt'
+            ? `"${clampText(neutralize(String(item.proposal.title ?? '')), 80)}" — ${String((item.proposal as { body?: string })?.body?.length ?? 0)} chars`
+            : `"${clampText(neutralize(String(item.proposal.content ?? item.proposal.text ?? '')), 120)}"`,
+          author: item.fromSessionId === undefined ? 'panel' : item.fromSessionId,
+          createdAt: item.createdAt,
+        })),
+        summary: `${String(items.length)} pending proposal${items.length === 1 ? '' : 's'} (status=${status})`,
+      })
+    },
+  } as never)
+
+  const pendingReject = defineTool({
+    name: 'cortex_pending_reject',
+    description:
+      'Reject one pending proposal by id. The proposal row is kept as an audit trail (its status becomes `rejected`), so no data is lost. Use it when a proposal is stale, irrelevant, or duplicated. The id must come from a previous `cortex_pending_list` call; this tool does not search.',
+    parameters: {
+      type: 'object',
+      properties: { id: { type: 'string', description: 'The pending-item id from cortex_pending_list.' } },
+      required: ['id'],
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
+    execute: async (args: never, _execution: Execution) => {
+      if (!svc.enabled) return off()
+      const a = (args ?? {}) as Args
+      const id = typeof a.id === 'string' ? a.id.trim() : ''
+      if (id === '') return neutralizeDeep({ status: 'refused', message: 'id is required: pass the pending-item id from cortex_pending_list' })
+      const result = await svc.deps.store.rejectPending(id)
+      if (!result.ok) return neutralizeDeep({ status: 'refused', message: `could not reject proposal ${id}: ${neutralize(result.error)}` })
+      if (result.data === null) return neutralizeDeep({ status: 'not-found', message: `no pending proposal ${id} (it may already be approved or rejected)` })
+      return neutralizeDeep({ status: 'rejected', id, kind: result.data.kind, summary: `rejected proposal ${id} (kind=${result.data.kind}) — the audit row is kept` })
+    },
+  } as never)
+
+  const deletePrompt = defineTool({
+    name: 'cortex_prompt_delete',
+    description:
+      'Remove one saved prompt from the library. Use it when the workflow is stale or the title/body no longer matches what the user needs. The delete is destructive: queued injections of the prompt are dropped too, and the prompt can no longer be injected until the user re-saves it. When mutate.confirmRequired is on, this is two steps: the first call returns a single-use token, the second must present it.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The prompt id from cortex_prompt_list.' },
+        confirm: { type: 'string', description: 'Only when mutate.confirmRequired is on: the token from the first call.' },
+      },
+      required: ['id'],
+    },
+    output: { schema: JSON_OBJECT_OUTPUT, render: RENDER },
+    execute: async (args: never, _execution: Execution) => {
+      if (!svc.enabled) return off()
+      const a = (args ?? {}) as Args
+      const id = typeof a.id === 'string' ? a.id.trim() : ''
+      if (id === '') return neutralizeDeep({ status: 'refused', message: 'id is required: pass the prompt id from cortex_prompt_list' })
+      const gateRequired = svc.deps.cfg().mutate?.confirmRequired === true
+      const gated = await gateMutation(gateRequired, `prompt:delete:${id}`, a.confirm, `delete prompt ${id} from the library (all queued injections dropped)`, async () => svc.remove(id, 'DELETE'))
+      if (gated.token !== undefined) return neutralizeDeep({ status: 'confirm-required', token: gated.token, warning: gated.warning })
+      if (!gated.ok) return neutralizeDeep({ status: 'refused', message: gated.warning })
+      const result = gated.result as Awaited<ReturnType<typeof svc.remove>>
+      return neutralizeDeep({ status: result.ok ? 'deleted' : 'refused', message: result.message, id: result.ok ? id : null })
+    },
+  } as never)
+
+  return [list, get, save, pendingList, pendingReject, deletePrompt, toggle, inject]
 }

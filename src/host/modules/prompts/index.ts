@@ -3,8 +3,9 @@
  * `{ name, TOOLS, apply, readEndpoints, writeEndpoints }`.
  *
  * What this module owns:
- *  - the five `cortex_prompt_*` tools (DESIGN §4) — list, get, save (proposal
- *    only), toggle, inject;
+ *  - the eight `cortex_prompt_*` / `cortex_pending_*` tools (DESIGN §4) — list,
+ *    get, save (proposal only), pending list, pending reject, delete, toggle,
+ *    inject;
  *  - the `cortex:prompts` per-turn injection seam at order 43, which renders the
  *    caller's own queue with the DESIGN §9.1 G-03 header, spends rounds only on a
  *    render that actually happened, and ends a sticky row with one honest expiry
@@ -40,6 +41,9 @@ export const TOOLS = [
   'cortex_prompt_list',
   'cortex_prompt_get',
   'cortex_prompt_save',
+  'cortex_pending_list',
+  'cortex_pending_reject',
+  'cortex_prompt_delete',
   'cortex_prompt_toggle',
   'cortex_prompt_inject',
 ] as const
