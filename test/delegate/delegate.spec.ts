@@ -24,6 +24,7 @@ const ECHO = fileURLToPath(new URL('./fixtures/echo-runner.mjs', import.meta.url
 const SLEEP = fileURLToPath(new URL('./fixtures/sleep-runner.mjs', import.meta.url))
 const SPAM = fileURLToPath(new URL('./fixtures/spam-runner.mjs', import.meta.url))
 const FAIL = fileURLToPath(new URL('./fixtures/fail-runner.mjs', import.meta.url))
+const QUIET = fileURLToPath(new URL('./fixtures/quiet-runner.mjs', import.meta.url))
 
 function runner(argv: string[], extra: Partial<RunnerSpec> = {}): RunnerSpec {
   return { argv, description: 'test fixture runner', timeoutSec: 0, env: { CORTEX_FIXTURE_PROBE: 'on' }, ...extra }
@@ -107,6 +108,7 @@ const RUNNERS = {
   sleep10: runner([process.execPath, SLEEP, '10000'], { timeoutSec: 1 }),
   spam: runner([process.execPath, SPAM, '300']),
   failAlways: runner([process.execPath, FAIL]),
+  quiet: runner([process.execPath, QUIET]),
 }
 
 /** Cancel every live child, then drop the tmp root. */
@@ -683,6 +685,36 @@ describe('delegate · auto-retry + dead-letter', () => {
       const jobs = (rpcList as { value: Array<{ id: string; maxRetries?: number }> }).value
       const listed = jobs.find(j => j.id === jobId)
       expect(listed?.maxRetries).toBe(2)
+    } finally {
+      await teardown(h)
+    }
+  })
+
+  it('succeeded + empty stdout: write-back logs + room, but does NOT queue a memory proposal', async () => {
+    const h = await boot({})
+    try {
+      const roomId = '' // no room — only test memory proposal behavior
+      const out = await callTool(h, 'cortex_delegate', { runner: 'quiet', task: 'do nothing visible' })
+      const jobId = String((out.job as { id: string }).id)
+      const done = await until('job succeeded with write-back', async () => {
+        const job = await h.svc.getJob(jobId)
+        if (job?.status !== 'succeeded') return null
+        const content = (await h.svc.readResultFile(jobId)) ?? ''
+        if (!content.includes('## write-back')) return null
+        return job
+      })
+      expect(done.exitCode).toBe(0)
+
+      const result = (await h.svc.readResultFile(jobId)) ?? ''
+      expect(result).toContain('## write-back')
+      expect(result).toContain('(no output)')
+
+      // critical regression guard: empty-summary jobs must not pollute the pending queue
+      const pending = await h.store.listPending({})
+      const items = pending.ok ? pending.data : []
+      expect(items).toHaveLength(0)
+      const live = await h.store.listEntries({ track: 'global', limit: 10 })
+      expect((live.ok ? live.data.entries : []).length).toBe(0)
     } finally {
       await teardown(h)
     }

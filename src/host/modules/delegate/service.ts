@@ -593,14 +593,19 @@ export class DelegateService {
     const daily = await store.logAppend({ scope: 'daily', text: line })
     notes.push(daily.ok ? 'daily log: appended' : `daily log FAILED: ${neutralize(daily.error)}`)
 
-    const proposal = clampText(`External run via delegate runner "${job.runner}" (job ${job.id}): ${summary}`, cfg.caps.entryChars)
-    const pending = await store.addPending({
-      kind: 'memory',
-      proposal: { track: 'global', content: proposal, importance: 3, tags: ['delegation', job.runner] },
-      reason: `machine-authored write-back from job ${job.id} — confirm before keeping`,
-      ...(job.sessionId !== undefined ? { fromSessionId: job.sessionId } : {}),
-    })
-    notes.push(pending.ok ? `memory proposal: queued as pending ${pending.data.id}` : `memory proposal FAILED: ${neutralize(pending.error)}`)
+    const isEmptySummary = summary === '' || summary === '(no output)'
+    if (isEmptySummary) {
+      notes.push('memory proposal: skipped (job produced no output — nothing to remember)')
+    } else {
+      const proposal = clampText(`External run via delegate runner "${job.runner}" (job ${job.id}): ${summary}`, cfg.caps.entryChars)
+      const pending = await store.addPending({
+        kind: 'memory',
+        proposal: { track: 'global', content: proposal, importance: 3, tags: ['delegation', job.runner] },
+        reason: `machine-authored write-back from job ${job.id} — confirm before keeping`,
+        ...(job.sessionId !== undefined ? { fromSessionId: job.sessionId } : {}),
+      })
+      notes.push(pending.ok ? `memory proposal: queued as pending ${pending.data.id}` : `memory proposal FAILED: ${neutralize(pending.error)}`)
+    }
 
     if (typeof job.roomId === 'string' && job.roomId !== '') {
       const posted = await store.postMessage(job.roomId, {
