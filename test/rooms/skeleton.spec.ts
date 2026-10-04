@@ -28,7 +28,7 @@ describe('M5 module faces (skeleton contract)', () => {
       expect(Object.keys(mod.writeEndpoints).length).toBeGreaterThan(0)
     }
     // Frozen .dev/RPC-ENDPOINTS.md names only, plus sessions.status (my addition).
-    expect(Object.keys(rooms.writeEndpoints).sort()).toEqual(['rooms.create', 'rooms.join', 'rooms.leave', 'rooms.post'])
+    expect(Object.keys(rooms.writeEndpoints).sort()).toEqual(['rooms.create', 'rooms.delete', 'rooms.join', 'rooms.leave', 'rooms.post'])
     expect(Object.keys(sessions.writeEndpoints).sort()).toEqual(['rooms.send', 'rooms.spawn'])
   })
 })

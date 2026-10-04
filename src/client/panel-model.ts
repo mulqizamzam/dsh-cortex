@@ -38,6 +38,7 @@ import type {
   RoomMember,
   RoomMemberState,
   RoomsStatusValue,
+  RoomDeleteResult,
   SessionsStatusValue,
   TodoItem,
   TodoListValue,
@@ -104,6 +105,12 @@ export interface RoomsState {
   postDraft: string
   spawnLabel: string
   spawnPrompt: string
+  /** Room whose deletion is armed in the confirm bar; null when nothing is. */
+  confirmDeleteRoomId: string | null
+  /** The single-use token the host issued for that room. */
+  deleteRoomToken: string | null
+  /** The host's first-call summary, so the cost is visible before Confirm. */
+  deleteRoomWarning: string | null
 }
 
 export interface PromptsState {
@@ -196,6 +203,8 @@ export interface PanelModel {
   /** Whether the spawn button may be enabled, and WHY not — from the host answer. */
   spawnGate(): { allowed: boolean; reason: string }
   spawnMember(input: { roomId: string; label: string; prompt: string }): Promise<void>
+  deleteRoom(roomId: string): Promise<void>
+  cancelDeleteRoom(): void
 
   selectPrompt(id: string): Promise<void>
 
@@ -268,6 +277,9 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
       postDraft: '',
       spawnLabel: '',
       spawnPrompt: '',
+      confirmDeleteRoomId: null,
+      deleteRoomToken: null,
+      deleteRoomWarning: null,
     },
     prompts: { list: { kind: 'idle' }, detail: { kind: 'idle' }, selectedId: null },
     decisions: { list: { kind: 'idle' }, searchHits: { kind: 'idle' }, query: '', selectedId: null },
@@ -627,6 +639,46 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     await loadRooms()
   }
 
+  /**
+   * Room delete, two clicks AND two RPC calls.
+   *
+   * Click one only ARMS: it asks the host for the token (which resolves the room
+   * and reports what is inside it) and parks it in state. Click two presents
+   * that token, and only that call deletes. The host refuses a token issued for
+   * another room, so arming room A and switching to room B cannot delete B.
+   */
+  async function deleteRoom(roomId: string): Promise<void> {
+    const armed = state.rooms.confirmDeleteRoomId === roomId && state.rooms.deleteRoomToken !== null
+    const token = armed ? state.rooms.deleteRoomToken : undefined
+    patch({ rooms: { ...state.rooms, busy: 'delete' } })
+    const result = await api.roomsDelete(roomId, token ?? undefined)
+    patch({ rooms: { ...state.rooms, busy: null } })
+    if (result.ok === false) {
+      patch({ rooms: { ...state.rooms, confirmDeleteRoomId: null, deleteRoomToken: null, deleteRoomWarning: null } })
+      flash('error', result.error.message)
+      return
+    }
+    const value: RoomDeleteResult = result.value
+    if (armed || value.deleted === true) {
+      patch({ rooms: { ...state.rooms, confirmDeleteRoomId: null, deleteRoomToken: null, deleteRoomWarning: null, selectedId: null, messages: { kind: 'idle' }, pages: [], earliestSeq: null, members: { kind: 'idle' } } })
+      flash('ok', value.message ?? `room ${roomId} deleted`)
+      await loadRooms()
+      return
+    }
+    // Arm call: nothing was deleted. Keep the token and show the host's own
+    // summary so the cost (members, boards, messages, running agents) is read
+    // BEFORE anyone clicks Confirm.
+    if (typeof value.token !== 'string' || value.token === '') {
+      flash('error', value.message ?? 'rooms.delete returned no token; nothing was deleted')
+      return
+    }
+    patch({ rooms: { ...state.rooms, confirmDeleteRoomId: roomId, deleteRoomToken: value.token, deleteRoomWarning: value.message ?? null } })
+  }
+
+  function cancelDeleteRoom(): void {
+    patch({ rooms: { ...state.rooms, confirmDeleteRoomId: null, deleteRoomToken: null, deleteRoomWarning: null } })
+  }
+
   // ------------------------------------------------------------- prompts ----
 
   async function loadPrompts(): Promise<void> {
@@ -867,6 +919,8 @@ export function createPanelModel(api: CortexApi, scope: PanelScopeSource = { cur
     selectRoom,
     createRoom: title => busy(() => createRoom(title)),
     postToRoom: (roomId, message) => busy(() => postToRoom(roomId, message)),
+    deleteRoom: roomId => busy(() => deleteRoom(roomId)),
+    cancelDeleteRoom,
     loadOlderMessages: () => busy(loadOlderMessages),
     setSpawnVisible(visible) {
       patch({ rooms: { ...state.rooms, showSpawn: visible } })

@@ -323,6 +323,15 @@ export interface SpawnResult {
   message?: string
 }
 
+/** `rooms.delete` result: the two-step shape mirrors `memory.delete`. */
+export interface RoomDeleteResult {
+  roomId: string
+  deleted: boolean
+  /** Present only on the first (arm) call. */
+  token?: string
+  message?: string
+}
+
 /** `jobs.list` row. */
 export interface JobRow {
   id: string
@@ -466,6 +475,12 @@ export interface CortexApi {
   roomsCreate(title: string, author?: RoomAuthor): Promise<CortexResult<RoomActionResult>>
   roomsPost(roomId: string, text: string, author?: RoomAuthor): Promise<CortexResult<RoomActionResult>>
   roomsSpawn(input: { roomId: string; label: string; prompt: string; model?: string }): Promise<CortexResult<SpawnResult>>
+  /**
+   * Delete a room and everything in it, in two steps. The first call names the
+   * room and receives a single-use token; the second presents it. Omitting
+   * `confirm` is therefore never destructive.
+   */
+  roomsDelete(roomId: string, confirm?: string): Promise<CortexResult<RoomDeleteResult>>
 
   sessionsStatus(): Promise<CortexResult<SessionsStatusValue>>
 
@@ -693,6 +708,7 @@ export function createCortexApi(call: RpcCall, options: CortexApiOptions = {}): 
     roomsPost: (roomId, message, author) =>
       write<RoomActionResult>('rooms.post', { roomId, text: message, ...authorFields(author) }),
     roomsSpawn: input => write<SpawnResult>('rooms.spawn', { ...input }),
+    roomsDelete: (roomId, confirm) => write<RoomDeleteResult>('rooms.delete', { roomId, ...(confirm === undefined ? {} : { confirm }) }),
 
     sessionsStatus: () => read<SessionsStatusValue>('sessions.status', {}),
 

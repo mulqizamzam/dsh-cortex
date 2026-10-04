@@ -481,7 +481,35 @@ export function RoomsTab(props: { state: PanelState['rooms']; model: PanelModel 
         'rooms.list',
       ),
       button('refresh', retryRooms),
+      state.selectedId !== null && state.confirmDeleteRoomId !== state.selectedId
+        ? button('Delete room', () => void model.deleteRoom(state.selectedId!), {
+            kind: 'danger',
+            disabled: state.busy === 'delete',
+            title: 'first click asks what is in this room and parks the token; second click confirms and destroys it',
+          })
+        : null,
     ),
+    // Show the confirm bar only when a room is selected and its deletion is armed.
+    state.selectedId !== null && state.confirmDeleteRoomId === state.selectedId
+      ? h(
+          'div',
+          { className: 'cx-entry', style: S.card, 'data-room-delete-confirm': state.selectedId },
+          h('div', { style: S.muted }, text(state.deleteRoomWarning ?? 'about to delete this room permanently')),
+          h(
+            'div',
+            { style: S.row, marginTop: 4 },
+            button('Confirm delete', () => void model.deleteRoom(state.selectedId!), {
+              disabled: state.busy === 'delete',
+              kind: 'danger',
+              title: 'rooms.delete — permanently destroys this room, all messages, boards and images',
+            }),
+            button('Cancel', () => model.cancelDeleteRoom(), {
+              kind: 'ghost',
+              title: 'leave this room alone',
+            }),
+          ),
+        )
+      : null,
     h(
       'form',
       {

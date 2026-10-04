@@ -331,6 +331,64 @@ describe('rpc endpoint maps', () => {
     expect(left?.ok).toBe(true)
   })
 
+  it('rooms.delete deletes nothing on the first call and everything on the second', async () => {
+    const { writeEndpoints } = await import('../../src/host/modules/rooms/rpc.ts')
+    const roomId = await createRoom('doomed room')
+    await callTool(harness.fake.tools.get('cortex_room_post'), { roomId, text: 'will be lost' }, author)
+
+    // Arm: no confirm, so the host resolves the room, names what is inside it and
+    // issues a token. The room must still be there afterwards.
+    const armed = await writeEndpoints['rooms.delete']?.({ roomId })
+    expect(armed?.ok).toBe(true)
+    const armValue = armed?.ok ? (armed.value as { deleted?: boolean; token?: string; message?: string }) : {}
+    expect(armValue.deleted).not.toBe(true)
+    expect(typeof armValue.token).toBe('string')
+    expect(String(armValue.token).length).toBeGreaterThan(0)
+    // The host's own summary is the warning the panel shows before Confirm.
+    expect(String(armValue.message)).toContain('not reversible')
+    expect(await harness.rooms.get(roomId)).toBeDefined()
+
+    // No token at all: refused, and still nothing destroyed.
+    const blind = await writeEndpoints['rooms.delete']?.({ roomId, confirm: '' })
+    expect(blind?.ok).toBe(false)
+    expect(await harness.rooms.get(roomId)).toBeDefined()
+
+    // The real token: this is the only call that deletes.
+    const done = await writeEndpoints['rooms.delete']?.({ roomId, confirm: armValue.token })
+    expect(done?.ok).toBe(true)
+    expect((done?.ok ? (done.value as { deleted?: boolean }).deleted : false)).toBe(true)
+    expect(await harness.rooms.get(roomId)).toBeUndefined()
+
+    // The token is single-use: replaying it is refused, and the room is already gone.
+    const replay = await writeEndpoints['rooms.delete']?.({ roomId, confirm: armValue.token })
+    expect(replay?.ok).toBe(false)
+  })
+
+  it('a token issued for one room cannot delete another', async () => {
+    const { writeEndpoints } = await import('../../src/host/modules/rooms/rpc.ts')
+    const first = await createRoom('first')
+    const second = await createRoom('second')
+    const armed = await writeEndpoints['rooms.delete']?.({ roomId: first })
+    const token = armed?.ok ? (armed.value as { token?: string }).token : undefined
+    expect(typeof token).toBe('string')
+
+    // Presenting room A's token against room B deletes nothing.
+    const wrong = await writeEndpoints['rooms.delete']?.({ roomId: second, confirm: token })
+    expect(wrong?.ok).toBe(false)
+    expect(await harness.rooms.get(second)).toBeDefined()
+
+    // And A itself is still there until its own token is presented.
+    expect(await harness.rooms.get(first)).toBeDefined()
+  })
+
+  it('rooms.delete needs a roomId and refuses cleanly for an unknown one', async () => {
+    const { writeEndpoints } = await import('../../src/host/modules/rooms/rpc.ts')
+    const blank = await writeEndpoints['rooms.delete']?.({})
+    expect(blank?.ok).toBe(false)
+    const unknown = await writeEndpoints['rooms.delete']?.({ roomId: 'not-a-room' })
+    expect(unknown?.ok).toBe(false)
+  })
+
   it('an unbound endpoint answers "not wired" instead of throwing (P4)', async () => {
     // Fresh module graph = the maps before any apply() bound them.
     vi.resetModules()
@@ -346,7 +404,7 @@ describe('rpc endpoint maps', () => {
   it('only the endpoint names the contract freezes are exported', async () => {
     const { readEndpoints, writeEndpoints } = await import('../../src/host/modules/rooms/rpc.ts')
     expect(Object.keys(readEndpoints).sort()).toEqual(['rooms.list', 'rooms.read', 'rooms.status'])
-    expect(Object.keys(writeEndpoints).sort()).toEqual(['rooms.create', 'rooms.join', 'rooms.leave', 'rooms.post'])
+    expect(Object.keys(writeEndpoints).sort()).toEqual(['rooms.create', 'rooms.delete', 'rooms.join', 'rooms.leave', 'rooms.post'])
   })
 })
 

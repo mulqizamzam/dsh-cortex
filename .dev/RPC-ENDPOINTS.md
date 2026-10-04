@@ -40,6 +40,7 @@ pid via store.pidFromCwd bila cwd diberikan; tanpa scope → proyek aktif sesi p
 - rooms.post {roomId, text, imagePaths?[]} → message (imagePaths wajib di dalam state root; validasi tipe mime + ukuran)
 - rooms.join {roomId, sessionId, label?} → ok
 - rooms.leave {roomId, sessionId} → ok
+- rooms.delete {roomId, confirm?} → {roomId, deleted, token?, message} (two-step: first call with no confirm returns a token bound to roomId; second call with confirm=token deletes)
 - rooms.spawn {roomId, label, prompt, cwd?, provider?, model?} → {sessionId} | refusal jujur (feature-detect agents.create di host)
 - rooms.send {sessionId, text} → ok | refusal (sesi tak hidup; tidak auto-create)
 - jobs.retry {jobId} → newJobId (hanya bila runner masih terdaftar & enabled)

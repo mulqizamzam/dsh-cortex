@@ -9,8 +9,12 @@
  * answers honestly instead of throwing.
  *
  * Frozen names used here: read `rooms.list`, `rooms.read`, `rooms.status`;
- * write `rooms.create`, `rooms.post`, `rooms.join`, `rooms.leave`.
+ * write `rooms.create`, `rooms.post`, `rooms.join`, `rooms.leave`, `rooms.delete`.
  * `rooms.spawn` / `rooms.send` belong to the sessions module.
+ *
+ * `rooms.delete` is the panel's door to the same destructive path the agent tool
+ * `cortex_room_delete` uses: two steps, and the token is issued for the room id
+ * that actually resolved, so a mistyped id cannot destroy anything.
  *
  * There is no caller session on an RPC call, so a write that needs an author
  * takes it from the payload (`sessionId`, else `label`, else `'ui'`) and the
@@ -155,6 +159,23 @@ export function roomsEndpoints(svc: RoomService): { read: Record<string, Endpoin
       const result = await svc.leave(roomId, sessionId)
       return result.ok ? { ok: true, value: neutralizeDeep({ message: result.message }) } : asNope(result.message, 'refused')
     },
+    'rooms.delete': async (payload) => {
+      if (!svc.enabled) return disabled()
+      const raw = payloadOf(payload)
+      const roomId = stringOf(raw.roomId)
+      if (roomId === '') return asNope('rooms.delete needs a roomId')
+      const result = await svc.delete({ roomId, confirm: raw.confirm })
+      if (!result.ok) return asNope(result.message, 'refused')
+      return {
+        ok: true,
+        value: neutralizeDeep({
+          roomId,
+          deleted: result.deleted === true,
+          ...(result.token !== undefined ? { token: result.token } : {}),
+          message: result.message,
+        }),
+      }
+    },
   }
 
   return { read, write }
@@ -195,4 +216,5 @@ export const writeEndpoints: Record<string, EndpointHandler> = {
   'rooms.post': routed('write', 'rooms.post'),
   'rooms.join': routed('write', 'rooms.join'),
   'rooms.leave': routed('write', 'rooms.leave'),
+  'rooms.delete': routed('write', 'rooms.delete'),
 }

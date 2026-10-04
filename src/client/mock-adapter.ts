@@ -409,6 +409,10 @@ const fixtures: Record<string, MockHandler> = {
   'rooms.post': payload => ({ ok: true, value: { seq: 13, images: [], refused: [], counts: { sent: 1 }, message: 'posted' } }),
   'rooms.join': payload => ({ ok: true, value: { message: `joined ${String(payload.roomId ?? '')}` } }),
   'rooms.leave': payload => ({ ok: true, value: { message: `left ${String(payload.roomId ?? '')}` } }),
+  'rooms.delete': payload =>
+    typeof payload.confirm === 'string' && payload.confirm.length > 0
+      ? { ok: true, value: { roomId: String(payload.roomId ?? ''), deleted: true, message: `deleted ${String(payload.roomId ?? '')}` } }
+      : { ok: true, value: { roomId: String(payload.roomId ?? ''), deleted: false, token: 'mock_delete_token' } },
   'rooms.spawn': payload => ({ ok: true, value: { sessionId: 'sess-new', message: `spawned ${String(payload.label ?? '')}` } }),
   'rooms.send': payload => ({ ok: true, value: { seq: 14, message: `sent to ${String(payload.sessionId ?? '')}` } }),
 
