@@ -16,17 +16,21 @@ import { makeTempRoot, removeTempRoot } from './helpers.ts'
  * The host snapshots every tool return value through `snapshotJsonValue()`
  * before it becomes a durable result, and a value carrying `undefined` is
  * rejected there as `value is not lossless JSON`
- * (host `packages/core/tools/src/index.ts:547`). `cortex_status` used to put
+ * (host `packages/core/tools/src/index.ts:548`). `cortex_status` used to put
  * exactly that into every healthy module row (`error: undefined`), so the tool
  * failed on every healthy boot. These tests pin the invariant at that boundary:
  * the host's own predicate when the harness checkout is reachable, and a
  * portable JSON-plainness walk of the same payload when it is not.
+ *
+ * 2026-10-09: the predicate moved out of `packages/core/session/src/json.ts`
+ * into `packages/util/values/src/index.ts` (host `refactor(values): make shared
+ * primitives duplicate-install safe`), so the candidates point there.
  */
 
 /** Host checkout locations, nearest sibling first; absent = boundary checks skip. */
 const HOST_JSON_CANDIDATES = [
-  '../../../../deepseek-harness/packages/core/session/src/json.ts',
-  '/home/administrator/deepseek-harness/packages/core/session/src/json.ts',
+  '../../../../deepseek-harness/packages/util/values/src/index.ts',
+  '/home/administrator/deepseek-harness/packages/util/values/src/index.ts',
 ].map(location => fileURLToPath(new URL(location, import.meta.url)))
 let hostSnapshot: ((value: unknown) => unknown) | null = null
 
@@ -72,7 +76,6 @@ function fakeContext(): { ctx: HostContextShape; tools: Map<string, ToolDefiniti
         return () => {}
       },
     },
-    settings: { writable: false, register: (_n: string, _s: unknown, cfg: { base?: unknown }) => ({ get: () => cfg.base }) },
     agents: { get: () => undefined, roots: () => [] },
     get: (name: string) => (name === 'systemPrompt' ? { context: () => () => {} } : undefined),
     inject: (_services: string[], callback: (context: HostContextShape) => void) => { callback(ctx) },

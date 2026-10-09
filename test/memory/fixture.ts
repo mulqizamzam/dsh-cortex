@@ -104,7 +104,7 @@ export interface Harness {
   cwd: string
   scopes: ScopeCache
   readonly config: ResolvedConfig
-  /** Replace the live config the way `settings/updated` does. */
+  /** Replace the live config the way an entry hot-reload does (re-apply). */
   setConfig(patch: ConfigPatch): ResolvedConfig
   /** Args merged with this session's cwd, as the tools do internally. */
   sessionArgs(extra?: Record<string, unknown>): Record<string, unknown>

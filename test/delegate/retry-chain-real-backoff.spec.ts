@@ -67,7 +67,6 @@ describe('delegate · retry chain at real production backoff', () => {
           return () => {}
         },
       },
-      settings: { writable: false, register: () => { throw new Error('unused') } },
       agents: { get: () => undefined, roots: () => [] },
       get: () => undefined,
       inject: () => undefined,

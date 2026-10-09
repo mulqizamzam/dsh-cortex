@@ -46,7 +46,6 @@ describe('delegate retry · a scheduled retry is never observed as terminal', ()
         tools: {
           register: (d: ToolDefinition): (() => void) => { tools.set(d.name, d); return () => {} },
         },
-        settings: { writable: false, register: () => { throw new Error('unused') } },
         agents: { get: () => undefined, roots: () => [] },
         get: () => undefined,
         inject: () => undefined,

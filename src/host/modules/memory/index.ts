@@ -10,7 +10,7 @@
  * (`src/host/rpc-channels.ts`), or the wiring (`src/host/index.ts`) — the parent
  * appends this module to `MODULES` and merges `readEndpoints` / `writeEndpoints`
  * into its dispatch tables. Nothing in this file registers a channel or a
- * settings namespace. A refused tool name fails THIS module only — the entry's
+ * settings contribution. A refused tool name fails THIS module only — the entry's
  * wiring loop reports it in `cortex_status` — so a memory failure costs memory,
  * never the boot (P4).
  */

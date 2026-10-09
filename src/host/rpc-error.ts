@@ -75,7 +75,7 @@ export const HOST_RPC_ERROR_CODES: readonly string[] = [
   'directory-create-failed', 'directory-picker-unavailable', 'agent-preset-read-only',
   'agent-preset-locked', 'agent-preset-conflict', 'agent-preset-not-found', 'agent-preset-invalid',
   'agent-busy', 'attachment-error', 'queue-item-not-found', 'steer-unavailable', 'command-error',
-  'unknown-command', 'settings-rejected', 'settings-conflict', 'credential-rejected',
+  'unknown-command', 'credential-rejected',
   'model-discovery-failed', 'title-invalid', 'fork-unavailable', 'subagent-parent-unavailable',
   'subagent-not-found', 'subagent-catalog-diagnostic', 'subagent-not-resumable',
   'subagent-unauthorized', 'subagent-delivery-unavailable', 'internal',

@@ -26,7 +26,6 @@ async function makeDeps(root: string, autoNotify: boolean): Promise<ModuleDeps> 
   return {
     ctx: {
       tools: { register: () => undefined },
-      settings: { register: () => ({ get: () => ({}) }) } as never,
       agents: { get: () => undefined, roots: () => [] } as never,
       get: () => undefined,
       inject: () => undefined,

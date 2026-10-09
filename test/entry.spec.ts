@@ -18,7 +18,6 @@ import { makeTempRoot, removeTempRoot } from './helpers.ts'
 interface FakeOptions {
   duplicateTool?: string
   toolsThrows?: boolean
-  settingsThrows?: boolean
   injectThrows?: boolean
   noHomeService?: boolean
   /** Host-owned live agent handles (F10: a release must not terminate them). */
@@ -28,7 +27,6 @@ interface FakeOptions {
 interface Fake {
   ctx: HostContextShape
   tools: Map<string, ToolDefinition>
-  namespaces: string[]
   channels: string[]
   handlers: Map<string, (endpoint: string, payload: unknown) => Promise<unknown>>
   listeners: Map<string, (...args: never[]) => unknown>
@@ -43,7 +41,6 @@ interface Fake {
 
 function makeFake(options: FakeOptions = {}, home = ''): Fake {
   const tools = new Map<string, ToolDefinition>()
-  const namespaces: string[] = []
   const channels: string[] = []
   const handlers = new Map<string, (endpoint: string, payload: unknown) => Promise<unknown>>()
   const listeners = new Map<string, (...args: never[]) => unknown>()
@@ -53,24 +50,19 @@ function makeFake(options: FakeOptions = {}, home = ''): Fake {
   const liveAgents = options.agents ?? []
   const ctx = {
     tools: {
+      // Mirrors the host registry: registration returns a disposer that
+      // REMOVES the tool, so a hot-reload re-apply cannot collide with its
+      // own predecessor's registrations.
       register(definition: ToolDefinition): () => void {
         if (options.toolsThrows === true) throw new Error('tools service unavailable')
         if (options.duplicateTool === definition.name || tools.has(definition.name)) {
           throw new Error(`tool "${definition.name}" is already registered`)
         }
         tools.set(definition.name, definition)
-        return () => {}
+        return () => { tools.delete(definition.name) }
       },
       // Mirrors the host registry lookup (ToolRuntime.get) so F6 is exercised.
       get(name: string): ToolDefinition | undefined { return tools.get(name) },
-    },
-    settings: {
-      writable: false,
-      register<T>(namespace: string, _schema: unknown, config: { base?: Partial<T> }): { get(): T } {
-        if (options.settingsThrows === true) throw new Error(`settings namespace "${namespace}" is already registered`)
-        namespaces.push(namespace)
-        return { get: () => config.base as T }
-      },
     },
     agents: {
       get: (id: string) => liveAgents.find(agent => agent.id === id),
@@ -91,7 +83,10 @@ function makeFake(options: FakeOptions = {}, home = ''): Fake {
             handle(channel: string, handler: (endpoint: string, payload: unknown) => Promise<unknown>): () => void {
               channels.push(channel)
               handlers.set(channel, handler)
-              return () => {}
+              return () => {
+                channels.splice(channels.indexOf(channel), 1)
+                handlers.delete(channel)
+              }
             },
           },
         }
@@ -112,7 +107,7 @@ function makeFake(options: FakeOptions = {}, home = ''): Fake {
     },
   } as unknown as HostContextShape
   return {
-    ctx, tools, namespaces, channels, handlers, listeners, homeAsked, effects, subscriptions,
+    ctx, tools, channels, handlers, listeners, homeAsked, effects, subscriptions,
     unload(): void {
       for (const entry of effects.splice(0).reverse()) {
         try {
@@ -148,17 +143,18 @@ afterEach(async () => {
 describe('plugin entry contract', () => {
   it('exports the cordis plugin face and the wired module set', () => {
     expect(name).toBe('dsh-cortex')
-    expect(inject).toEqual(['tools', 'settings', 'commands', 'agents', 'subagents'])
+    // `settings` is deliberately NOT injected: the host projects the exported
+    // Config into the generated settings form itself.
+    expect(inject).toEqual(['tools', 'commands', 'agents', 'subagents'])
     // Parent integration (wave-1 wired): MODULES grew from [status] to the
     // assembled modules; M4 (prompts) is now wired too (B3), and cortex_purge is
     // part of the wired set (honest reclaim-space tool).
     expect(MODULES.map(module => module.name)).toEqual(['status', 'memory', 'todo', 'logs', 'progress', 'rooms', 'sessions', 'delegate', 'purge', 'prompts', 'conflict', 'board', 'decisions'])
   })
 
-  it('boots: registers the cortex namespace, the status tool, and uses the host home service', () => {
+  it('boots: registers the status tool and uses the host home service', () => {
     const fake = makeFake({}, home)
     expect(() => apply(fake.ctx, {})).not.toThrow()
-    expect(fake.namespaces).toEqual(['cortex'])
     expect(fake.tools.has('cortex_status')).toBe(true)
     expect(fake.homeAsked).toContain('dshHomePath')
     expect(cortexRuntime().modules[0]?.state).toBe('ok')
@@ -210,22 +206,19 @@ describe('plugin entry contract', () => {
     expect(cortexRuntime().modules.filter(item => item.state === 'ok').length).toBeGreaterThanOrEqual(6)
   })
 
-  it('a settings collision degrades to a status-only tool naming the failure', async () => {
-    const fake = makeFake({ settingsThrows: true }, home)
+  it('no typed host-surface fault escapes apply (P4)', () => {
+    const fake = makeFake({ toolsThrows: true, injectThrows: true, noHomeService: true }, home)
     const originalError = console.error
-    const seen: string[] = []
-    console.error = (...parts: unknown[]) => { seen.push(parts.join(' ')) }
+    console.error = () => {}
     try {
       expect(() => apply(fake.ctx, {})).not.toThrow()
     } finally {
       console.error = originalError
     }
-    expect(fake.tools.has('cortex_status')).toBe(true)
-    expect(cortexRuntime().bootError).toContain('already registered')
-    expect(seen.join('\n')).toContain('boot failed')
-    const value = await fake.tools.get('cortex_status')?.execute({} as never, { signal: new AbortController().signal }) as Record<string, unknown>
-    expect(value.state).toBe('failed')
-    expect(String(value.error)).toContain('already registered')
+    // Every module failed and nothing escaped: with the settings scope gone,
+    // no typed host-surface call can throw out of boot() any more.
+    expect(fake.tools.size).toBe(0)
+    expect(cortexRuntime().modules[0]?.state).toBe('failed')
   })
 
   it('a missing tools service cannot break the boot either', () => {
@@ -248,11 +241,13 @@ describe('plugin entry contract', () => {
     expect((cortexRuntime().errors ?? []).join(' ')).toContain('connection service missing')
   })
 
-  it('mounts the loopback read+write channels when the web transport exists', () => {
+  it('mounts the read+write channels when the web transport exists', () => {
     const fake = makeFake({}, home)
     apply(fake.ctx, {})
     // Parent integration: the write channel (human/UI actions, confirm-gated per
-    // handler) is mounted beside the read channel, both loopback-authority.
+    // handler) is mounted beside the read channel. The current host applies its
+    // own transport trust to every registered channel, so no authority option
+    // is passed.
     expect(fake.channels).toEqual([CORTEX_READ_CHANNEL, CORTEX_WRITE_CHANNEL])
     expect(CORTEX_READ_CHANNEL).toMatch(/^\/[A-Za-z0-9._~-]+$/)
     expect(CORTEX_PING_ENDPOINT).toBe('ping')
@@ -278,21 +273,6 @@ describe('brace safety in model-visible output (host #53)', () => {
       expect(text).not.toContain('}}')
     }
     expect(JSON.stringify(payload)).toContain('{ {tpl} }')
-  })
-
-  it('a boot error whose text carries braces is neutralized too', async () => {
-    const fake = makeFake({ settingsThrows: true, duplicateTool: undefined }, home)
-    const originalError = console.error
-    console.error = () => {}
-    try {
-      apply(fake.ctx, { stateRoot: join(home, '{{deep}}') } as Partial<CortexConfig>)
-    } finally {
-      console.error = originalError
-    }
-    // settings threw => degraded path; its only tool must still be brace-safe.
-    const value = JSON.stringify(await fake.tools.get('cortex_status')?.execute({} as never, { signal: new AbortController().signal }))
-    expect(value).not.toContain('{{')
-    expect(value).not.toContain('}}')
   })
 
   it('tool and parameter descriptions are brace-free by construction', () => {
@@ -508,27 +488,28 @@ describe('duplicate endpoint conflicts are observable (F7)', () => {
   })
 })
 
-/** F8 (Phase 1 audit): live config updates must not leave a second, silently
- * divergent authoritative config — mutable fields follow, stateRoot is pinned. */
-describe('live config update consistency (F8)', () => {
-  function bootF8(): Fake {
-    const fake = makeFake({}, home)
-    apply(fake.ctx, { stateRoot: join(home, 'state') } as Partial<CortexConfig>)
-    return fake
-  }
-  const pushConfig = (fake: Fake, next: Record<string, unknown>): void => {
-    const listener = fake.listeners.get('settings/updated')
-    if (listener === undefined) throw new Error('settings/updated listener not registered')
-    ;(listener as unknown as (namespace: string, value: unknown) => void)('cortex', next)
-  }
+/** F8 (Phase 1 audit): the host no longer swaps config live — a settings edit
+ * hot-reloads the entry, re-invoking `apply` with the new config. The port
+ * keeps the guarantee that matters: one authoritative config per boot, every
+ * field resolved by the real schema, and the superseded boot's registrations
+ * released before the next one mounts. */
+describe('config update through entry hot-reload (F8)', () => {
   const statusOf = async (fake: Fake): Promise<Record<string, unknown>> => {
     const tool = fake.tools.get('cortex_status')
     if (tool === undefined) throw new Error('cortex_status not registered')
     return await tool.execute({} as never, { signal: new AbortController().signal }) as Record<string, unknown>
   }
+  /** Deliver a config edit the way the host does: dispose the entry's fiber
+   *  (unwinding every effect), then re-invoke apply on the SAME host context —
+   *  cordis `Fiber.update()` restarts the fiber and reuses its context. */
+  const pushConfig = (fake: Fake, next: Record<string, unknown>): void => {
+    fake.unload()
+    apply(fake.ctx, next as Partial<CortexConfig>)
+  }
 
-  it('a valid live update changes the fields meant to be live', async () => {
-    const fake = bootF8()
+  it('a valid update changes the fields meant to be live', async () => {
+    const fake = makeFake({}, home)
+    apply(fake.ctx, { stateRoot: join(home, 'state') } as Partial<CortexConfig>)
     pushConfig(fake, { stateRoot: join(home, 'state'), inject: { enabled: false } })
     const payload = await statusOf(fake)
     expect((payload.config as Record<string, unknown>).inject).toMatchObject({ enabled: false })
@@ -536,23 +517,22 @@ describe('live config update consistency (F8)', () => {
     expect(ping.value?.injectEnabled).toBe(false)
   })
 
-  it('a stateRoot change is ignored deterministically and never silently applied', async () => {
-    const fake = bootF8()
-    const activeRoot = cortexRuntime().modules.length > 0 ? join(home, 'state') : ''
+  it('a stateRoot change takes effect on the reload that applied it', async () => {
+    const fake = makeFake({}, home)
+    apply(fake.ctx, { stateRoot: join(home, 'state') } as Partial<CortexConfig>)
     pushConfig(fake, { stateRoot: join(home, 'elsewhere') })
-    const errors = (cortexRuntime().errors ?? []).join(' | ')
-    expect(errors).toContain('stateRoot change')
-    expect(errors).toContain('immutable after boot')
-    // The reported config root is the ACTIVE root, never the ignored one.
+    // The reload carries its own store: the reported root IS the new one, so
+    // the config and the state on disk cannot diverge.
     const payload = await statusOf(fake)
-    const config = payload.config as Record<string, unknown>
-    expect(config.stateRoot).toBe(activeRoot)
+    expect(payload.stateRoot).toBe(join(home, 'elsewhere'))
+    expect((payload.config as Record<string, unknown>).stateRoot).toBe(join(home, 'elsewhere'))
     const ping = await fake.handlers.get(CORTEX_READ_CHANNEL)?.('ping', {}) as { value?: { stateRoot: string } }
-    expect(ping.value?.stateRoot).toBe(activeRoot)
+    expect(ping.value?.stateRoot).toBe(join(home, 'elsewhere'))
   })
 
   it('an unusable patch is coerced by the real schema mechanism, not reported as a failed swap', async () => {
-    const fake = bootF8()
+    const fake = makeFake({}, home)
+    apply(fake.ctx, { stateRoot: join(home, 'state') } as Partial<CortexConfig>)
     pushConfig(fake, { stateRoot: join(home, 'state'), caps: 'nonsense', inject: 42, delegation: { maxConcurrent: -5 } })
     expect((cortexRuntime().errors ?? []).filter(entry => entry.includes('config'))).toEqual([])
     const payload = await statusOf(fake)
@@ -562,6 +542,28 @@ describe('live config update consistency (F8)', () => {
     // Final resolved values, not just "no error" (config.ts:129-133 coerces a
     // non-object `inject` back to the shipped defaults on every key).
     expect((payload.config as Record<string, unknown>).inject).toEqual({ enabled: true, user: true, global: true, project: true, todo: true })
+  })
+
+  it('a hot-reload releases the superseded boot before the next one mounts', async () => {
+    const fake = makeFake({}, home)
+    apply(fake.ctx, { stateRoot: join(home, 'state') } as Partial<CortexConfig>)
+    const readHandlerBefore = fake.handlers.get(CORTEX_READ_CHANNEL)
+    const toolCountBefore = fake.tools.size
+    expect(toolCountBefore).toBeGreaterThan(20)
+    // Disposal of the superseded fiber: every effect unwound, so the old boot
+    // releases its tools and its channels instead of shadowing them.
+    fake.unload()
+    expect(fake.tools.size).toBe(0)
+    expect(fake.handlers.size).toBe(0)
+    // The reload re-invokes apply on the SAME context: a full, collision-free
+    // boot with the new config (the prompts module's mount bookkeeping is
+    // released with the fiber, so its tools re-register too).
+    pushConfig(fake, { stateRoot: join(home, 'state'), inject: { enabled: false } })
+    expect(fake.tools.size).toBe(toolCountBefore)
+    expect(fake.handlers.get(CORTEX_READ_CHANNEL)).not.toBe(readHandlerBefore)
+    const payload = await statusOf(fake)
+    expect(payload.bootError).toBe(null)
+    expect((payload.config as Record<string, unknown>).inject).toMatchObject({ enabled: false })
   })
 })
 

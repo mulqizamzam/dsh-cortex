@@ -67,7 +67,6 @@ function makeHarness(config: Partial<CortexConfig>, root: string): Harness {
         return () => {}
       },
     },
-    settings: { writable: false, register: () => { throw new Error('settings unused by delegate') } },
     agents: { get: () => undefined, roots: () => [] },
     get: () => undefined,
     inject: () => undefined,

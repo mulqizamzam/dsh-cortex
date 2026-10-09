@@ -100,7 +100,7 @@ export interface Harness {
   /** Everything the store or a module warned about (P4 visibility). */
   warnings: string[]
   scopes: TaskScopeCache
-  /** Live config object; mutate a field to emulate a `settings/updated` swap. */
+  /** Live config object; mutate a field to emulate a hot-reload re-apply. */
   config: ResolvedConfig & LogReviewConfig
   clock: { value: Date }
   cleanup(): Promise<void>

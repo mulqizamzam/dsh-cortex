@@ -91,7 +91,7 @@ export interface Fake {
   warnings: string[]
 }
 
-/** The host bag: tools, agents (create optional), settings, systemPrompt. */
+/** The host bag: tools, agents (create optional), systemPrompt. */
 export function makeFakeContext(options: FakeOptions = {}): Fake {
   const tools = new Map<string, ToolDefinition>()
   const registeredNames: string[] = []
@@ -147,12 +147,6 @@ export function makeFakeContext(options: FakeOptions = {}): Fake {
         tools.set(definition.name, definition)
         registeredNames.push(definition.name)
         return () => {}
-      },
-    },
-    settings: {
-      writable: false,
-      register<T>(_namespace: string, _schema: unknown, opts: { base?: Partial<T> }): { get(): T } {
-        return { get: () => (opts.base ?? {}) as T }
       },
     },
     agents: agentService,

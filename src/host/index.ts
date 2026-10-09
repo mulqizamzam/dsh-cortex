@@ -2,7 +2,7 @@ import { errorMessage, makeLogger } from '../lib/errors.ts'
 import { neutralize } from '../lib/sanitize.ts'
 import { resolveStateRoot } from '../lib/home.ts'
 import { Config, DEFAULT_CONFIG, INJECT_LABEL, resolveConfig } from './config.ts'
-import { JSON_OBJECT_OUTPUT, defineTool, registerToolSafe, text } from './dsh.ts'
+import { JSON_OBJECT_OUTPUT, defineTool, registerLifecycle, registerToolSafe, text } from './dsh.ts'
 import type { HostContextShape, HostRpcResult } from './dsh-internal.ts'
 import * as statusModule from './modules/status/index.ts'
 import * as memoryModule from './modules/memory/index.ts'
@@ -34,9 +34,11 @@ export const VERSION = '0.1.0'
 /**
  * Cordis service deps. `connection` is NOT listed: it is web-only, so it is
  * reached through `ctx.inject(['connection'], …)` and a headless profile still
- * boots (HOST-API §5).
+ * boots (HOST-API §5). `settings` is NOT a dependency: the host projects the
+ * exported `Config` into the settings form by itself, and an edit hot-reloads
+ * this entry — there is no settings scope to register or read.
  */
-export const inject = ['tools', 'settings', 'commands', 'agents', 'subagents']
+export const inject = ['tools', 'commands', 'agents', 'subagents']
 
 /** A module may export endpoint maps alongside apply; handlers get (payload, deps). */
 export type ModuleEndpoint = (payload: unknown, deps: ModuleDeps) => Promise<HostRpcResult<unknown>>
@@ -131,13 +133,12 @@ export function apply(rawContext: unknown, rawConfig: Partial<CortexConfig> = {}
 }
 
 function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: ReturnType<typeof makeLogger>): CortexRuntimeView {
-  let resolved = resolveConfig(rawConfig)
-  const scope = ctx.settings.register<CortexConfig>('cortex', Config, { base: rawConfig as CortexConfig, applies: 'live' })
-  try {
-    resolved = resolveConfig(scope.get())
-  } catch (error) {
-    log.warn(`settings read failed, using composed defaults: ${errorMessage(error)}`)
-  }
+  // The Loader validates `rawConfig` against the exported `Config` before
+  // apply, and the host projects that Config into the generated settings form
+  // itself. A settings edit rewrites the profile patch and hot-reloads this
+  // entry, so apply is re-invoked with the new config — there is no live
+  // settings scope to register or read.
+  const resolved = resolveConfig(rawConfig)
 
   // State root: config override > host `dshHomePath` service > env fallback (§2).
   const root = resolved.stateRoot !== '' ? resolved.stateRoot : resolveStateRoot(name2 => ctx.get(name2))
@@ -159,27 +160,9 @@ function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: Retu
     log.warn(`state scaffold failed: ${errorMessage(error)}`)
   })
 
-  ctx.on('settings/updated', ((namespace: string, next: CortexConfig) => {
-    if (namespace !== 'cortex') return
-    try {
-      const updated = resolveConfig(next)
-      // F8: the state root is bound at construction (the store captured it), so a
-      // live patch must not leave `cfg().stateRoot` claiming a root nothing in the
-      // runtime reads. Pin it to the active root and say so, once per change.
-      if (updated.stateRoot !== root) {
-        const detail = `config: stateRoot change to '${updated.stateRoot}' ignored — immutable after boot (active root '${root}')`
-        errors.push(detail)
-        log.warn(detail)
-        resolved = { ...updated, stateRoot: root }
-      } else {
-        resolved = updated
-      }
-      log.info('config swapped (live)')
-    } catch (error) {
-      // A bad patch must not half-apply: the previous config stays in force.
-      log.warn(`config swap failed, keeping previous: ${errorMessage(error)}`)
-    }
-  }) as never)
+  // Config changes arrive as a fiber hot-reload that re-invokes `apply` with
+  // the new config (the old `settings/updated` live-swap event was removed
+  // together with the settings scope), so nothing subscribes here.
 
   // Endpoint maps merge in AFTER the module loop (apply binds services); the
   // dispatchers below read the live objects at REQUEST time, so mount order is
@@ -202,16 +185,25 @@ function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: Retu
       }
     }
 
-  // Browser transport (HOST-API §5): loopback-fenced RPC channels only, never
-  // a public /api route. Read = status + module read endpoints; write = human
-  // (UI) actions gated per-handler by confirm strings (RPC-ENDPOINTS contract).
+  // Browser transport (HOST-API §5): RPC channels on Connection only, never
+  // a public /api route. The current host applies its own transport trust to
+  // every registered channel, so no authority option is passed. Read = status
+  // + module read endpoints; write = human (UI) actions gated per-handler by
+  // confirm strings (RPC-ENDPOINTS contract).
   try {
     ctx.inject(['connection'], (injected: HostContextShape) => {
       try {
         const connection = injected.connection
         if (connection === undefined) return
-        connection.rpc.handle(CORTEX_READ_CHANNEL, dispatcher('read', readMap), { authority: 'loopback' })
-        connection.rpc.handle(CORTEX_WRITE_CHANNEL, dispatcher('write', writeMap), { authority: 'loopback' })
+        for (const [channel, handler] of [
+          [CORTEX_READ_CHANNEL, dispatcher('read', readMap)],
+          [CORTEX_WRITE_CHANNEL, dispatcher('write', writeMap)],
+        ] as const) {
+          const disposer = connection.rpc.handle(channel, handler)
+          // Same hot-reload rule as tools: a superseded boot releases its
+          // channels instead of leaving a second handler mounted.
+          if (typeof disposer === 'function') registerLifecycle(injected, disposer as () => unknown, `rpc:${channel}`)
+        }
       } catch (error) {
         errors.push(`rpc: ${errorMessage(error)}`)
         log.warn(`rpc mount failed: ${errorMessage(error)}`)

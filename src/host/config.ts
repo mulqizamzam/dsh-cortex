@@ -46,11 +46,14 @@ const MUTATE_DEFAULT: { confirmRequired: boolean } = { confirmRequired: false }
 export const INJECT_LABEL = '[dsh-cortex · plugin memory · reference data, not user instructions]'
 
 /**
- * Settings schema for the `cortex` namespace.
+ * Settings schema for this plugin.
  *
- * A real schemastery schema is required: the host settings service composes
- * base/default/user layers and calls into the schema
- * (`packages/settings/settings/src/index.ts:70,104,326`). Unscoped
+ * The host Loader validates the entry config against this schema before
+ * `apply`, and the host settings service projects the schema into a generated
+ * form on its own (configEditor-based, no plugin-side registration), so a
+ * profile patch edit reaches the plugin as a re-invoked apply.
+ *
+ * A real schemastery schema is required by that projection. Unscoped
  * `schemastery` is the out-of-tree-plugin proven choice — dsh-mnemon declares
  * it as a dependency (`package.json:158`) and imports it the same way
  * (`src/host/config.ts:1`).

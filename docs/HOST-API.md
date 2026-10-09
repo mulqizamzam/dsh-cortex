@@ -58,14 +58,22 @@ ToolDefinition shape (mnemon `src/host/dsh.ts:85-98`):
 
 ## 4. Settings
 
-`ctx.settings.register` requires a real **schemastery** schema (UNSCOPED npm pkg
-`schemastery@^3.18.0`; live proof: dsh-mnemon `src/host/config.ts:1` `import z from 'schemastery'` +
-dep `package.json:158`): host layers = schema defaults → registrant `base` → user document;
-serialization via `schema.toJSON()` (host `packages/settings/settings/src/index.ts:70,104`).
-Pattern: `export interface Config {...}` + `export const Config: Schema<Config> = Schema.object({... every field .default() ...})`.
-`const scope = ctx.settings.register<T>(ns, Config, { base, applies: 'live', validate? })`;
-`scope.get(): T`; event `ctx.on('settings/updated', (ns, next) => ...)`; also
-`'settings/document-updated'`. Evidence: mnemon `plugin.ts:47-78`.
+There is **no plugin-side settings registration** on the current host. The
+Loader validates the entry's raw config against the plugin's exported
+**schemastery** schema (UNSCOPED npm pkg `schemastery@^3.18.0`) before `apply`,
+and the host settings service projects that schema into a generated form on its
+own (`packages/settings/settings/src/index.ts`: `SettingsForms.describe()` reads
+each entry's Config through the configEditor; no `ctx.settings.register` exists
+any more). `Config` must stay `Schema.object({... every field .default() ...})`
+so a `{}` patch resolves completely.
+
+A settings edit writes the profile patch and **hot-reloads the entry**, which
+re-invokes `apply` with the new validated config — there is no live-swap event
+(`settings/updated` was removed; `settings/document-updated` is a UI revision
+notification, not a config payload). Consequence for this plugin: every
+registration (tools, RPC channels) hands its disposer to `ctx.effect`, so a
+superseded boot releases its contributions before the next one mounts.
+
 ⚠️ PROFILE PATCH RULE: a patch row targeting `id: dsh-cortex` REPLACES THE ENTIRE config value
 (no deep merge) — README must restate all keys in any example override
 (`docs/user/develop/basic/publish.md` + `packages/bundle/base/cordis.patch.yml:5-7`).
@@ -75,14 +83,19 @@ Pattern: `export interface Config {...}` + `export const Config: Schema<Config> 
 ```ts
 ctx.inject(['connection'], (c) => {
   if (!c.connection) return
-  c.connection.rpc.handle('/dsh-cortex-read',  handler, { authority: 'loopback' })
-  c.connection.rpc.handle('/dsh-cortex-write', handler, { authority: 'loopback' })
+  c.connection.rpc.handle('/dsh-cortex-read',  handler)   // returns an async disposer
+  c.connection.rpc.handle('/dsh-cortex-write', handler)
 })
 ```
 Client (inside client plugin with `inject:['connection']`): `ctx.connection.rpc.call(channel, endpoint, payload, signal?)` →
 `{ok:true, value} | {ok:false, error:{code,message}}`.
 Evidence (all verified in source, 2026-09-15): `packages/client/connection/src/rpc.ts:5-11` (`ConnectionRpcAuthority`, "trust fence applied before a Host RPC channel reaches its handler"; `handle(channel, handler, {authority})` :33), `src/client/rpc.ts:26` (`call(channel, endpoint, payload, signal)`); mnemon usage `plugin.ts:118-137`, `client/remote-rpc.ts:65`, `host/protocol.ts:27-31` (channel names `/dsh-mnemon-*`).
 - Authority options seen used: `'loopback'` (default) / `'trusted-host'` (mnemon maps remoteAccess to this). Keep `loopback` for everything; writes require a **UI-issued capability token** we mint per page session (belt-and-braces; P3).
+- **2026-10-09 update (verified against host 0.2.0-rc.2):** the current host's
+  `handle()` takes `(channel, handler)` only — `ConnectionRpcAuthority` and the
+  options argument were removed (`packages/client/connection/src/rpc.ts:173`),
+  and Connection now applies its own Host/Origin + browser-auth trust to every
+  registered channel. Do not pass an authority option.
 - This closes the audit's #1 memory-evolve defect (3/73 mutation handlers guarded) by construction: our ONLY attack surface is two authenticated rpc channels.
 
 ## 6. Sessions: status, messages, spawn
@@ -153,4 +166,4 @@ export function apply(rawContext: unknown): void {
 
 ## 11. Events to use (proven names)
 
-`agent/created`, `agent/session-start`, `agent/turn-stopping`, `agent/pre-step`, `session/event` (payload `(session, event)`; `event.type === 'turn/end'` etc.), `tools/result`, `settings/updated`, `settings/document-updated`, `loader/partial-dispose` (cleanup). Evidence: mnemon lifecycle.ts + plugin.ts (grep `ctx.on('` in dsh-mnemon/src/host).
+`agent/created`, `agent/session-start`, `agent/turn-stopping`, `agent/pre-step`, `session/event` (payload `(session, event)`; `event.type === 'turn/end'` etc.), `tools/result`, `settings/document-updated`, `loader/partial-dispose` (cleanup). Evidence: mnemon lifecycle.ts + plugin.ts (grep `ctx.on('` in dsh-mnemon/src/host).

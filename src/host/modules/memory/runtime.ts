@@ -199,14 +199,28 @@ export interface SystemPromptContextApi {
   context(entry: { name: string; order: number; text: string | ((context: unknown) => string) }): unknown
 }
 
+/** One seam mount per host context, with its release. The token comparison in
+ * `release` keeps a late disposal of a superseded boot from tearing down the
+ * live boot's seam. */
+interface SeamMount {
+  release(): void
+}
+
 /** Contexts that already carry a memory block; a second `context()` name throws. */
-const registeredContexts = new WeakSet<object>()
+const registeredContexts = new WeakMap<object, SeamMount>()
 
 /**
  * Register the memory block exactly once per host context (C-16): a repeat
- * `apply()` reuses the first registration instead of paying the host's duplicate
- * name throw, and a host with no `systemPrompt.context` seam simply goes without
- * the block — the tools and the endpoints are unaffected.
+ * `apply()` without an intervening disposal reuses the first registration
+ * instead of paying the host's duplicate name throw, and a host with no
+ * `systemPrompt.context` seam simply goes without the block — the tools and
+ * the endpoints are unaffected.
+ *
+ * A settings edit hot-reloads the plugin fiber, which re-invokes `apply()` on
+ * the SAME context after disposing the previous epoch's effects. The seam's
+ * host disposer and the bookkeeping therefore ride on `ctx.effect`, so the
+ * re-invoked apply registers a fresh seam for the new boot instead of leaving
+ * the old one (closing over the superseded store and config) live.
  */
 export type RegisterOutcome = 'registered' | 'already' | 'unavailable' | 'refused'
 
@@ -221,13 +235,27 @@ export function registerOnce(
   try {
     const service = ctx.get('systemPrompt') as SystemPromptContextApi | undefined
     if (service === undefined || service === null || typeof service.context !== 'function') return 'unavailable'
-    service.context({ name, order, text: (context: unknown) => injector.text(context) })
-    registeredContexts.add(ctx)
+    const disposer = service.context({ name, order, text: (context: unknown) => injector.text(context) })
+    const mount: SeamMount = {
+      release: () => {
+        if (registeredContexts.get(ctx) !== mount) return
+        registeredContexts.delete(ctx)
+        if (typeof disposer === 'function') (disposer as () => unknown)()
+      },
+    }
+    registeredContexts.set(ctx, mount)
+    try {
+      const effect = (ctx as { effect?: (callback: () => unknown, label?: string) => unknown }).effect
+      if (typeof effect === 'function') effect.call(ctx, () => mount.release, `dsh-cortex:${name} seam`)
+    } catch (error) {
+      // A host without effect keeps the seam for the process lifetime; the
+      // guard above still prevents a duplicate registration.
+      deps.warn(`${name} seam release not registered: ${neutralize(errorMessage(error))}`)
+    }
     return 'registered'
   } catch (error) {
     // The host refused (or the seam is broken): memory stays off for this
     // profile, the tools and endpoints keep working, and nothing escapes (P4).
-    registeredContexts.add(ctx)
     deps.warn(`memory context registration failed: ${neutralize(errorMessage(error))}`)
     return 'refused'
   }

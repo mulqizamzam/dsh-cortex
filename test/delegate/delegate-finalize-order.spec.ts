@@ -36,7 +36,7 @@ function makeService(): DelegateService {
   const store = new CortexStore({ root: root as string, caps: () => cfg.caps })
   void store.init()
   const deps = {
-    ctx: { tools: { register: () => () => {} }, settings: {}, agents: { get: () => undefined, roots: () => [] }, on: () => () => {}, effect: (fn: () => unknown) => fn() },
+    ctx: { tools: { register: () => () => {} }, agents: { get: () => undefined, roots: () => [] }, on: () => () => {}, effect: (fn: () => unknown) => fn() },
     cfg: () => cfg,
     store,
     log: () => {},

@@ -17,8 +17,8 @@
  *  - the inject queue file inside the store's own `inject/<sessionId>.json`.
  *
  * What it deliberately does NOT do:
- *  - it never registers an RPC channel, a settings namespace or a second context
- *    name (a duplicate `context()` name throws in the host);
+ *  - it never registers an RPC channel, a settings contribution or a second
+ *    context name (a duplicate `context()` name throws in the host);
  *  - it never lets a model write the library: `cortex_prompt_save` files a
  *    proposal, and approval is a human click (see `pending.ts`);
  *  - it never injects across sessions in v1 — see `resolveAgentInjectTarget`;
@@ -58,8 +58,16 @@ export type { EndpointHandler, PromptSummary }
 export { approvePendingPrompt, proposalToPrompt } from './pending.ts'
 export type { PendingPromptDecision } from './pending.ts'
 
-/** Tool names THIS module registered on each host context (a re-mount is a no-op). */
-const mountedTools = new WeakMap<object, Set<string>>()
+/** One tool mount per host context: the names this module registered plus the
+ * release that clears them. The token comparison in `release` keeps a late
+ * disposal of a superseded boot from clearing the live boot's mount. */
+interface ToolMount {
+  readonly names: Set<string>
+  release(): void
+}
+
+/** Tool names THIS module registered, per host context (a re-mount is a no-op). */
+const mountedTools = new WeakMap<object, ToolMount>()
 
 let service: PromptsService | null = null
 
@@ -96,20 +104,36 @@ export function apply(deps: ModuleDeps): void {
   // Fire-and-forget: a boot must not wait on the state tree (P4).
   void svc.warmLiveSessions()
 
-  // A repeat `apply()` on the SAME host context (hot reload, a second wiring
-  // pass) owns these names already: re-registering would only produce five
-  // collision warnings and make a healthy module look broken.
+  // A settings edit hot-reloads the plugin fiber: the previous epoch's effects
+  // (including the tool registrations, now disposal-safe) are unwound and
+  // `apply` runs again on the SAME host context. The mount bookkeeping rides
+  // the same disposal, so the re-invoked apply registers a full tool set
+  // instead of trusting names whose registrations were just released. A repeat
+  // apply WITHOUT an intervening disposal still reuses the mount: re-registering
+  // would only produce collision warnings and make a healthy module look broken.
   const owned = mountedTools.get(deps.ctx)
+  let mount = owned
+  if (mount === undefined) {
+    const names = new Set<string>()
+    mount = {
+      names,
+      release: () => {
+        if (mountedTools.get(deps.ctx) !== mount) return
+        mountedTools.delete(deps.ctx)
+        names.clear()
+      },
+    }
+    mountedTools.set(deps.ctx, mount)
+  }
+  registerLifecycle(deps.ctx, () => mount.release(), 'dsh-cortex:prompts tool mount', deps.warn)
   let refused = 0
   const failures: string[] = []
-  if (owned !== undefined && TOOLS.every(name => owned.has(name))) {
+  if (mount.names.size === TOOLS.length && TOOLS.every(name => mount.names.has(name))) {
     deps.log('prompts: already mounted on this context (tools and seam reused)')
   } else {
-    const mine = owned ?? new Set<string>()
-    mountedTools.set(deps.ctx, mine)
     for (const definition of promptTools(svc)) {
       const registered = registerToolSafe(deps.ctx, definition)
-      if (registered.ok) mine.add(registered.name)
+      if (registered.ok) mount.names.add(registered.name)
       else {
         refused += 1
         failures.push(`${registered.name}: ${registered.error ?? 'unknown'}`)

@@ -83,7 +83,6 @@ describe('delegation cwd · a retry runs where attempt 1 ran', () => {
             return () => {}
           },
         },
-        settings: { writable: false, register: () => { throw new Error('unused') } },
         agents: { get: () => undefined, roots: () => [] },
         get: () => undefined,
         inject: () => undefined,
