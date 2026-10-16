@@ -131,7 +131,11 @@ export class ConflictService {
     // Filter out expired claims.
     const now = Date.now()
     const active = existing.filter(c => {
-      if (ttlSeconds === 0) return true
+      // The EXISTING claim's ttl decides its own expiry (as in check(),
+      // listClaims() and expireClaims()); testing the incoming declaration's ttl
+      // here made declare() and check() disagree about the same claim — a claim
+      // long expired still raised a CONFLICT, and a permanent claim was missed.
+      if (c.ttlSeconds === 0) return true
       const age = (now - new Date(c.declaredAt).getTime()) / 1000
       return age < c.ttlSeconds
     })

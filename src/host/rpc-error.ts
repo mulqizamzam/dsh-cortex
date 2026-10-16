@@ -110,7 +110,7 @@ export function hostErrorCode(pluginCode: string): string {
  * @returns an `RpcResult` whose `error.code` is in the host's set AND whose
  *          `error.details` satisfies that code's branch.
  */
-export function refuse(message: string, pluginCode = 'refused'): RpcResult<unknown> {
+export function refuse<T = unknown>(message: string, pluginCode = 'refused'): RpcResult<T> {
   const host = hostErrorCode(pluginCode)
   // The host code says WHO is at fault; the message still says WHAT happened,
   // so a refusal keeps its diagnostic value after the projection. The leading

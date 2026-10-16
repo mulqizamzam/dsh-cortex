@@ -24,7 +24,7 @@ export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue
  */
 export type RpcResult<T> =
   | { ok: true; value: T }
-  | { ok: false; error: { code?: string; message: string; details?: Record<string, unknown> } }
+  | { ok: false; error: { code: string; message: string; details: Record<string, unknown> } }
 
 /** HOST-API §5: keep one call shape. The current host's `rpc.handle` takes
  * (channel, handler) and applies its own transport trust — the old

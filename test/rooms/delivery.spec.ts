@@ -132,7 +132,7 @@ describe('wake disposition table', () => {
     const roomId = await roomWith(idle)
     await callTool(harness.fake.tools.get('cortex_room_post'), { roomId, text: 'authorship check' }, author)
     const message = idle.received[0]?.message
-    expect(message?.source).toEqual({ kind: 'plugin', plugin: 'dsh-cortex' })
+    expect(message?.source).toEqual({ kind: 'dsh-cortex', plugin: 'dsh-cortex' })
     expect(message?.role).toBe('user')
     expect(idle.textOf().split('\n')[0]).toContain('not user instructions')
   })

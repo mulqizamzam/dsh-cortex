@@ -138,7 +138,7 @@ function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: Retu
   // itself. A settings edit rewrites the profile patch and hot-reloads this
   // entry, so apply is re-invoked with the new config — there is no live
   // settings scope to register or read.
-  const resolved = resolveConfig(rawConfig)
+  const resolved = resolveConfig(rawConfig, message => log.warn(message))
 
   // State root: config override > host `dshHomePath` service > env fallback (§2).
   const root = resolved.stateRoot !== '' ? resolved.stateRoot : resolveStateRoot(name2 => ctx.get(name2))
@@ -181,7 +181,7 @@ function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: Retu
         return await handler(payload, deps)
       } catch (error) {
         // Never let a handler throw at the transport (mirrors module rpc wrappers).
-        return { ok: false, error: { message: neutralize(errorMessage(error)) } }
+        return refuse(neutralize(errorMessage(error)), 'handler-failed')
       }
     }
 
@@ -275,7 +275,7 @@ function boot(ctx: HostContextShape, rawConfig: Partial<CortexConfig>, log: Retu
     const p = payload !== null && typeof payload === 'object' && !Array.isArray(payload) ? payload as Record<string, unknown> : {}
     const status = p.status === 'approved' || p.status === 'rejected' ? p.status : 'pending'
     const listed = await store.listPending({ status, limit: 500 })
-    if (listed.ok !== true) return { ok: false, error: { message: listed.error } }
+    if (listed.ok !== true) return refuse(neutralize(listed.error), 'handler-failed')
     return { ok: true, value: { items: listed.data, truncated: listed.data.length >= 500 } }
   }
 

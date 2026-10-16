@@ -15,10 +15,12 @@ import type { DelegateService } from './service.ts'
  * throwing.
  */
 
-const notWired = (): RpcResult<unknown> => ({
-  ok: false,
-  error: { code: 'internal', message: '[not-wired] delegation endpoints are not wired (module failed to start?)' },
-})
+// `refuse` adds the `[code]` prefix the client reads back AND the `details`
+// every host error branch requires. The literal envelope this replaced carried
+// neither, so the host rejected it and the panel showed a transport error
+// instead of this honest line.
+const notWired = (): RpcResult<unknown> =>
+  refuse('delegation endpoints are not wired (module failed to start?)', 'not-wired')
 
 const registry: { read: Record<string, EndpointHandler>; write: Record<string, EndpointHandler> } = { read: {}, write: {} }
 

@@ -154,6 +154,8 @@ export class CortexStore {
   private readOnlyState: boolean | undefined
   /** One in-flight write per room (`postMessage`'s seq is a read-modify-write). */
   private readonly roomChains = new Map<string, Promise<void>>()
+  /** One in-flight write overall: a write body is a read-modify-write on a shared file. */
+  private writeChain: Promise<void> = Promise.resolve()
 
   constructor(options: StoreOptions) {
     this.root = options.root
@@ -187,12 +189,31 @@ export class CortexStore {
 
   /** Every WRITE method goes through here; reads keep `run()` directly. The
    * schema gate lives at this single boundary, so no write path can skip it by
-   * forgetting a check of its own. */
+   * forgetting a check of its own.
+   *
+   * The same boundary serializes, and it has to: most write bodies are a
+   * read-modify-write on a SHARED file (`todos/<track>.json`,
+   * `rooms/<id>/room.json`, `board/<id>.json`), and the atomic rename stops a
+   * torn file, not a lost update. Two bodies overlapping in time both read the
+   * same snapshot, then the later rename discards the earlier one — silently,
+   * with BOTH callers told they succeeded. That is how 20 concurrent
+   * `addTodo`s on one track used to leave a single todo behind.
+   *
+   * One chain at the gate covers every method, including the new ones, instead
+   * of a lock per call site that the next writer forgets to take. A write body
+   * never calls another write method (they read through `run()`), so this
+   * cannot wait on itself; and store writes are small local file operations, so
+   * the queueing cost is a few microseconds each. */
   private write<T>(label: string, body: () => Promise<T>): Promise<CortexResult<T>> {
-    return this.run(label, async () => {
+    const result = this.writeChain.then(() => this.run(label, async () => {
       if (await this.stateIsReadOnly()) throw new Error(STATE_READ_ONLY_ERROR)
       return body()
-    })
+    }))
+    // `run` already turns every failure into an envelope, so this never
+    // rejects; swallow anyway, because one rejected step would otherwise poison
+    // every later write in the process.
+    this.writeChain = result.then(() => undefined, () => undefined)
+    return result
   }
 
   /** Serialize work per room: `postMessage` derives its seq from a
@@ -799,8 +820,13 @@ export class CortexStore {
     return this.run('getRoom', async () => (isSafeKey(roomId) ? await this.read<Room | null>(this.paths.roomDoc(roomId), null) : null))
   }
 
+  /** Serialized on the room chain, like `postMessage`. `room.json` is one
+   * document with several read-modify-write editors — join, leave, the post's
+   * `lastSeq`, the member stamp — and the write gate alone is not enough: it
+   * serializes the WRITE, not the read the write was computed from. The room
+   * chain is what makes each editor atomic against the others. */
   joinRoom(roomId: string, member: Partial<RoomMember> & { label: string }): Promise<CortexResult<Room | null>> {
-    return this.write('joinRoom', async () => {
+    return this.serializePerRoom(roomId, () => this.write('joinRoom', async () => {
       const room = (await this.getRoom(roomId)).data ?? null
       if (room === null) return null
       const key = member.sessionId ?? `label:${member.label}`
@@ -811,7 +837,7 @@ export class CortexStore {
       const next: Room = { ...room, members }
       await writeJsonAtomic(this.paths.roomDoc(roomId), next)
       return next
-    })
+    }))
   }
 
   /**
@@ -828,7 +854,11 @@ export class CortexStore {
       const parsed = Number.parseInt((raw ?? '0').trim(), 10)
       let seq = Number.isFinite(parsed) && parsed > 0 ? parsed : 0
       if (seq === 0) {
-        const { names } = await listDir(this.paths.roomMessages(roomId), 2000)
+        // `listNames`, NOT `listDir`: listDir keeps the OLDEST `cap` names, so
+        // past the cap this read the wrong end of the directory and recovered a
+        // seq that already had a message under it — the post then overwrote a
+        // stored message while reporting success.
+        const names = await listNames(this.paths.roomMessages(roomId))
         for (const name of names) {
           const value = Number.parseInt(name.replace(/\.json$/, ''), 10)
           if (Number.isFinite(value) && value > seq) seq = value

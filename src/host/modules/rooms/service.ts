@@ -109,9 +109,10 @@ export function formatCounts(counts: DeliveryCounts, results: readonly DeliveryR
 }
 
 /**
- * A mail as the host expects it: `source.kind = 'plugin'` (never `'user'`,
- * G-02) plus the first-line banner in the text itself, so authorship survives
- * whatever a given host build renders for plugin sources.
+ * A mail as the host expects it: `source.kind` is this plugin's own name (never
+ * `'user'`, G-02) plus the first-line banner in the text itself, so authorship
+ * survives whatever a given host build renders for plugin sources. The retired
+ * `kind: 'plugin'` wrapper is refused by the format v4 session writer.
  */
 export function roomMailMessage(mails: readonly RoomMail[], root: string, label: string = MAIL_LABEL): HostUserMessage {
   const body = mails.map(mail => renderMail(mail, root)).join('\n\n')
@@ -121,7 +122,7 @@ export function roomMailMessage(mails: readonly RoomMail[], root: string, label:
     // `source` field, and the banner repeats it in the text (belt + braces).
     role: 'user',
     content: [{ type: 'text', text: neutralize(`${neutralize(label)}\n${body}`) }],
-    source: { kind: 'plugin', plugin: 'dsh-cortex' },
+    source: { kind: 'dsh-cortex', plugin: 'dsh-cortex' },
   }
 }
 
@@ -354,19 +355,33 @@ export class RoomService {
    * Remove a member. `CortexStore.updateRoom` is likewise named in M0-NOTES and
    * absent from store.ts, so this module rewrites `room.json` itself (inside the
    * state root; TODO(PARENT): promote to the store and delete this body).
+   *
+   * The read and the rewrite both run inside the room chain. `room.json` has
+   * several whole-document editors — join, the post's `lastSeq`, the member
+   * stamp, this one — and a snapshot read OUTSIDE the chain is stale by the time
+   * it is written back, so the editor silently reinstates whatever landed in
+   * between. Twenty overlapping leaves used to apply exactly one removal and
+   * report twenty successes.
    */
   async leave(roomId: string, sessionId: string): Promise<{ ok: boolean; message: string }> {
-    const room = await this.get(roomId)
-    if (room === undefined) return { ok: false, message: `no such room: ${neutralize(roomId)}` }
-    const members = room.members.filter(member => member.sessionId !== sessionId)
-    if (members.length === room.members.length) return { ok: false, message: `session ${sessionId} is not a member of ${roomId}` }
-    try {
-      const written = await this.deps.store.writeStateJson(this.deps.store.paths.roomDoc(room.id), { ...room, members })
-      if (!written.ok) throw new Error(written.error)
-    } catch (error) {
-      return { ok: false, message: `could not rewrite room ${roomId}: ${errorMessage(error)}` }
-    }
-    return { ok: true, message: `left room ${roomId}` }
+    let outcome: { ok: boolean; message: string } = { ok: false, message: `no such room: ${neutralize(roomId)}` }
+    await this.deps.store.serializePerRoom(roomId, async () => {
+      const room = await this.get(roomId)
+      if (room === undefined) return
+      const members = room.members.filter(member => member.sessionId !== sessionId)
+      if (members.length === room.members.length) {
+        outcome = { ok: false, message: `session ${sessionId} is not a member of ${roomId}` }
+        return
+      }
+      try {
+        const written = await this.deps.store.writeStateJson(this.deps.store.paths.roomDoc(room.id), { ...room, members })
+        if (!written.ok) throw new Error(written.error)
+        outcome = { ok: true, message: `left room ${roomId}` }
+      } catch (error) {
+        outcome = { ok: false, message: `could not rewrite room ${roomId}: ${errorMessage(error)}` }
+      }
+    })
+    return outcome
   }
 
   /**

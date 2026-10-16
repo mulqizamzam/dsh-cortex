@@ -7,6 +7,7 @@ import {
 } from '../../src/host/modules/memory/endpoints.ts'
 import { apply } from '../../src/host/modules/memory/index.ts'
 import { LIST_CAP } from '../../src/host/store.ts'
+import { pluginErrorCode } from '../../src/client/api.ts'
 import { removeTempRoot } from '../helpers.ts'
 import { fakeAgent, makeHarness, seedEntries } from './fixture.ts'
 import type { Harness } from './fixture.ts'
@@ -36,6 +37,20 @@ async function call(which: 'read' | 'write', endpoint: string, payload: unknown)
   const handler = table[endpoint]
   expect(handler, `${endpoint} must be exported`).toBeTypeOf('function')
   return await handler(payload, host.deps) as never
+}
+
+/**
+ * The plugin's own code, read the way the CLIENT reads it.
+ *
+ * The host's `error.code` is a closed 40-member session/workspace vocabulary
+ * with no slot for a plugin's domain errors (rpc-error.ts), so the plugin
+ * projects onto it and keeps its own code in the message. Asserting
+ * `error.code` directly pinned a value the host rejects — which is exactly the
+ * reply it used to throw away, taking the message with it.
+ */
+function pluginCode(result: { error?: { code?: string; message?: string } }): string {
+  const error = result.error
+  return pluginErrorCode({ code: error?.code ?? '', message: error?.message ?? '' })
 }
 
 /** The id-addressing most of these tests need. */
@@ -129,7 +144,7 @@ describe('write endpoints', () => {
     if (list.ok) expect(list.data.entries[0]?.importance).toBe(5)
     const missing = await call('write', 'memory.update', { id: 'ffffffffffff', patch: { content: 'x' } })
     expect(missing.ok).toBe(false)
-    expect(missing.error?.code).toBe('not-found')
+    expect(pluginCode(missing)).toBe('not-found')
   })
 
   it('archive then restore round-trips through the endpoints', async () => {
@@ -155,7 +170,7 @@ describe('write endpoints', () => {
     expect(typeof first.value.token).toBe('string')
     const wrong = await call('write', 'memory.delete', { id, confirm: 'yes' })
     expect(wrong.ok).toBe(false)
-    expect(wrong.error?.code).toBe('bad-confirm')
+    expect(pluginCode(wrong)).toBe('bad-confirm')
     // The RPC path uses the same issued token (no frozen literal).
     const confirmed = await call('write', 'memory.delete', { id, confirm: first.value.token })
     expect(confirmed.value.deleted).toBe(true)
@@ -180,9 +195,9 @@ describe('write endpoints', () => {
     const todo = await host.store.addPending({ kind: 'todo', proposal: { track: 'work', text: 'not a memory' } })
     const refused = await call('write', 'pending.approve', { id: todo.ok ? todo.data.id : '' })
     expect(refused.ok).toBe(false)
-    expect(refused.error?.code).toBe('wrong-kind')
+    expect(pluginCode(refused)).toBe('wrong-kind')
     const nothing = await call('write', 'pending.approve', { id: 'abcdef123456' })
-    expect(nothing.error?.code).toBe('not-found')
+    expect(pluginCode(nothing)).toBe('not-found')
   })
 
   it('a project-scoped proposal approves into its own project only', async () => {
@@ -202,7 +217,7 @@ describe('write endpoints', () => {
     // Approving the same row twice must not duplicate the memory.
     const again = await call('write', 'pending.approve', { id: proposed.ok ? proposed.data.id : '', projectId: 'rpcproject000' })
     expect(again.ok).toBe(false)
-    expect(again.error?.code).toBe('not-found')
+    expect(pluginCode(again)).toBe('not-found')
   })
 
   it('a project-scoped proposal without a project in scope is refused, not moved', async () => {

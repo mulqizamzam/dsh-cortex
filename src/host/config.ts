@@ -125,6 +125,25 @@ function text(value: unknown, fallback: string): string {
   return typeof value === 'string' && value.trim() !== '' ? value.trim() : fallback
 }
 
+/**
+ * The state root override. `''` keeps the documented default
+ * (`<DSH_HOME>/dsh-cortex`); only an ABSOLUTE path may relocate it.
+ *
+ * A relative one was previously accepted verbatim and then joined into whatever
+ * the host's cwd happened to be, so `stateRoot: "~/dsh-cortex"` created a
+ * literal `~` directory beside the user's repo and orphaned every byte of plugin
+ * state from the "delete `<DSH_HOME>/dsh-cortex` and it is gone" contract. Same
+ * rule the runner cwd already follows: nothing else is honoured, and the caller
+ * is told rather than guessing.
+ */
+function stateRootOverride(value: unknown, warn?: (message: string) => void): string {
+  const raw = text(value, '')
+  if (raw === '') return ''
+  if (raw.startsWith('/')) return raw
+  warn?.(`stateRoot "${raw}" is not an absolute path; ignoring it and using <DSH_HOME>/dsh-cortex`)
+  return ''
+}
+
 function normalizeRunners(input: unknown): Record<string, RunnerSpec> {
   const runners: Record<string, RunnerSpec> = {}
   if (input === null || typeof input !== 'object') return runners
@@ -152,12 +171,12 @@ function normalizeRunners(input: unknown): Record<string, RunnerSpec> {
  * on: a cap of 0 or garbage falls back to the DESIGN §3 default instead of
  * silently disabling a track.
  */
-export function resolveConfig(input: Patch | undefined): ResolvedConfig {
+export function resolveConfig(input: Patch | undefined, warn?: (message: string) => void): ResolvedConfig {
   const source: Patch = input ?? {}
   const caps = { ...DEFAULT_CAPS }
   for (const key of CAP_KEYS) caps[key] = capValue(source.caps?.[key], DEFAULT_CAPS[key])
   return {
-    stateRoot: text(source.stateRoot, ''),
+    stateRoot: stateRootOverride(source.stateRoot, warn),
     inject: {
       enabled: bool(source.inject?.enabled, DEFAULT_CONFIG.inject.enabled),
       user: bool(source.inject?.user, DEFAULT_CONFIG.inject.user),

@@ -19,6 +19,7 @@ import type { RpcResult } from '../../dsh.ts'
 import type { ModuleDeps } from '../../types.ts'
 import { approvePendingMemory, deleteEntry, listEntries, moveEntry, ok, rejectPending, search, updateEntry } from './ops.ts'
 import type { OpResult } from './ops.ts'
+import { refuse } from '../../rpc-error.ts'
 import { contextFor, invalidateInjector } from './runtime.ts'
 
 /** One RPC handler, as the parent's dispatch table expects it. */
@@ -29,7 +30,11 @@ function rpcOk<T>(value: T): RpcResult<T> {
 }
 
 function rpcFail(error: string, code?: string): RpcResult<never> {
-  return { ok: false, error: { message: neutralize(error), ...(code === undefined ? {} : { code }) } }
+  // `refuse` supplies BOTH the host-valid `code` and the required `details: {}`.
+  // The literal this replaced shipped the raw plugin code with no details, so
+  // the host rejected every memory refusal and the panel showed a transport
+  // error rather than the honest line it was.
+  return refuse<never>(neutralize(error), code)
 }
 
 function fromOp<T>(result: OpResult<T>): RpcResult<T> {
