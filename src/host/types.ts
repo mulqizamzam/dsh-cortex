@@ -67,6 +67,8 @@ export interface LogRef {
   line: string
   /** True when the day cap rolled the write into a `<date>-2.md` sibling. */
   rolled?: boolean
+  /** True when the line could NOT be stored: every rollover part was full. */
+  dropped?: boolean
 }
 
 /** An AI proposal awaiting a human decision (DESIGN §4 pending queue). */

@@ -521,7 +521,10 @@ export class CortexStore {
       const file = input.scope === 'project' ? this.paths.projectLog(input.pid as string, date) : this.paths.dailyLog(date)
       const line = `- ${clampText(input.text, this.caps.logLineChars)}`
       const result = await appendMdCapped(file, line, this.caps.logLineChars, this.caps.logDayChars, clampText, this.warn)
-      return { scope: input.scope, ...(input.pid ? { pid: input.pid } : {}), date, line, ...(result.rolled ? { rolled: true } : {}) }
+      // `dropped` is propagated, not swallowed: `appendMdCapped` gives up when
+      // the last rollover part is full, and the log service used to answer
+      // "logged … continued in the next part" for bytes that were nowhere.
+      return { scope: input.scope, ...(input.pid ? { pid: input.pid } : {}), date, line, ...(result.rolled ? { rolled: true } : {}), ...(result.dropped ? { dropped: true } : {}) }
     })
   }
 

@@ -123,9 +123,22 @@ function matchesOption(chosen: string, options: readonly string[]): boolean {
   })
 }
 
+/** Leading list dash, quote, blockquote and emphasis markers are all noise. */
+const LEADING_NOISE = /^[\s>*_#-]+/
+
+/**
+ * True when a line carries the `[decision]` marker, with the SAME leading-noise
+ * tolerance the parser applies. Exported because a caller that skips irrelevant
+ * lines must not invent a narrower rule: the indexer filtered on the literal
+ * `- [decision]`, so every other documented marker was unreachable and silently
+ * dropped.
+ */
+export function hasDecisionMarker(line: string): boolean {
+  return String(line ?? '').replace(LEADING_NOISE, '').toLowerCase().startsWith('[decision]')
+}
+
 export function parseDecisionLine(line: string): DecisionParseResult {
-  // Leading list dash, quote, blockquote and emphasis markers are all noise.
-  const stripped = String(line ?? '').replace(/^[\s>*_#-]+/, '')
+  const stripped = String(line ?? '').replace(LEADING_NOISE, '')
   if (!stripped.toLowerCase().startsWith('[decision]')) {
     return { ok: false, error: 'line does not start with [decision]' }
   }

@@ -159,6 +159,11 @@ export class LogService {
     this.schedulePrune(scope, pid)
     // Recording a line settles the review debt for this session (G-06).
     this.nudge.noteLogged(sessionIdOf(agent) ?? '')
+    // A line the rollover limit could not place was NOT logged, and saying
+    // otherwise is the failure P4 exists to prevent.
+    if (result.data.dropped === true) {
+      return { ok: false, message: `the log line was NOT stored: every rollover part for ${result.data.date} is full (caps.logDayChars), so nothing was written. Re-read the log, then retry once the day rolls over.` }
+    }
     const rolled = result.data.rolled === true ? ' (day file was full; continued in the next part)' : ''
     return { ok: true, message: `logged to ${scope} ${result.data.date}${rolled}`, ref: result.data }
   }

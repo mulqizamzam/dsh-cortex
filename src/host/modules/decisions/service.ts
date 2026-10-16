@@ -14,7 +14,13 @@ import { isSafeKey } from '../../../lib/ids.ts'
 import { neutralize } from '../../../lib/sanitize.ts'
 import type { Decision, Entry, ModuleDeps, Track } from '../../types.ts'
 import { searchEntries } from '../memory/search.ts'
-import { parseDecisionLine } from './parser.ts'
+import { hasDecisionMarker, parseDecisionLine } from './parser.ts'
+
+/**
+ * The marker `store.logRead` appends after cutting its text at
+ * `caps.searchResultChars`. Nothing may be parsed past this point.
+ */
+const TRUNCATION_MARKER = '[… truncated]'
 
 /** How many memory entries one decision may link to. */
 export const LINK_LIMIT = 5
@@ -58,9 +64,21 @@ export interface IndexResult {
   errors: string[]
 }
 
-/** Dedup identity: neutralized (context, chosen) pair of one decision. */
-function decisionKey(context: string, chosen: string): string {
-  return `${context.trim().toLowerCase()}\u0000${chosen.trim().toLowerCase()}`
+/**
+ * Dedup identity of one decision.
+ *
+ * (context, chosen) alone was too narrow: a re-index must skip the SAME line,
+ * but two genuinely different decisions can share a context and a chosen option
+ * and differ only in rationale or in the alternatives considered — the second
+ * was then discarded as "already stored", silently. Every field here comes from
+ * the source line, so a re-index of the same line still yields the same key.
+ * `owner` is deliberately excluded: the indexer fills it from the calling
+ * session when the line stays silent, so it is not a property of the line.
+ */
+function decisionKey(decision: Pick<Decision, 'context' | 'options' | 'chosen' | 'rationale'>): string {
+  return [decision.context, decision.options.join(','), decision.chosen, decision.rationale]
+    .map(part => part.trim().toLowerCase())
+    .join('\u0000')
 }
 
 /** One decision as a human-readable block; honest about empty fields. */
@@ -137,7 +155,15 @@ export class DecisionService {
   }): Promise<IndexResult> {
     const result = await this.store.logRead({ scope: args.scope, pid: args.pid, lastDays: args.lastDays ?? 7 })
     if (!result.ok) return { indexed: 0, skipped: 0, linked: 0, errors: [result.error] }
-    const lines = result.data.text.split('\n').filter(l => l.trim().startsWith('- [decision]'))
+    // `logRead` cuts its text at `caps.searchResultChars` and appends a marker.
+    // Splitting that text as if every line were complete both HID decisions past
+    // the cut (a clean-looking "found nothing" run) and could store a record
+    // composed from a half line, so the marker line is dropped and the run says
+    // it was truncated.
+    const truncated = result.data.text.includes(TRUNCATION_MARKER)
+    const lines = result.data.text
+      .split('\n')
+      .filter(line => !line.includes(TRUNCATION_MARKER) && hasDecisionMarker(line))
     // Dedup: a re-index must not duplicate what is already stored. Identity is
     // the neutralized (context, chosen) pair — parse is deterministic, so the
     // same source line always yields the same key. `reindex` opts out.
@@ -145,20 +171,23 @@ export class DecisionService {
     if (args.reindex !== true) {
       const existing = await this.store.listDecisions({ pid: args.pid, limit: 500 })
       if (existing.ok) {
-        for (const d of existing.data) known.add(decisionKey(d.context, d.chosen))
+        for (const d of existing.data) known.add(decisionKey(d))
       }
     }
     let indexed = 0
     let skipped = 0
     let linked = 0
     const errors: string[] = []
+    if (truncated) {
+      errors.push('the log read was truncated at caps.searchResultChars; any decision line past the cut was not examined (index a shorter window, or raise the cap)')
+    }
     // One listing for the whole run; `linkMemories: false` lists nothing at all.
     const linkPool = args.linkMemories === false ? [] : await this.loadLinkPool(args.pid)
     for (const raw of lines) {
       const parsed = parseDecisionLine(raw)
       if (!parsed.ok) { errors.push(parsed.error ?? 'unknown'); continue }
       const base = parsed.decision as Decision
-      if (known.has(decisionKey(base.context, base.chosen))) { skipped += 1; continue }
+      if (known.has(decisionKey(base))) { skipped += 1; continue }
       // A line that named its own author wins; the calling session only fills
       // the gap, because the indexer is often NOT the session that decided.
       const owner = base.owner !== '' ? base.owner : (args.owner ?? 'user')
@@ -174,7 +203,7 @@ export class DecisionService {
       else {
         indexed += 1
         linked += related.length
-        known.add(decisionKey(decision.context, decision.chosen))
+        known.add(decisionKey(decision))
       }
     }
     return { indexed, skipped, linked, errors }

@@ -89,6 +89,16 @@ export class DelegateService {
   }
 
   // --------------------------------------------------------------- dispatch --
+  /** One in-flight capacity-reservation. See `dispatch`. */
+  private reserving: Promise<void> = Promise.resolve()
+
+  /** Serialize a short critical section; the chain never rejects. */
+  private reserve<T>(body: () => Promise<T>): Promise<T> {
+    const result = this.reserving.then(body, body)
+    this.reserving = result.then(() => undefined, () => undefined)
+    return result
+  }
+
   async dispatch(input: DispatchInput, agent?: HostAgent): Promise<DispatchResult> {
     const refusal = this.gateRefusal()
     if (refusal !== null) return NO(refusal)
@@ -128,11 +138,6 @@ export class DelegateService {
       if (!room.ok || room.data === null) return NO(`room ${neutralize(roomId)} does not exist.`)
     }
 
-    const max = this.cfg().delegation.maxConcurrent
-    const page = await this.listJobs(500)
-    const live = page.jobs.filter(job => isLiveStatus(job.status) || this.active.has(job.id)).length
-    if (live >= max) return NO(`at capacity: ${String(live)} of ${String(max)} concurrent delegation jobs are live (delegation.maxConcurrent); retry after one finishes.`)
-
     const projectId = await this.resolveProjectId(agent)
     const maxRetries = this.cfg().delegation.retry.maxRetries
     const createInput: CreateJobInput = {
@@ -145,9 +150,26 @@ export class DelegateService {
       ...(agent?.id !== undefined ? { sessionId: String(agent.id) } : {}),
       ...(maxRetries > 0 ? { maxRetries } : {}),
     }
-    const created = await this.deps.store.createJob(createInput)
-    if (!created.ok) return NO(`createJob failed: ${neutralize(created.error)}`)
-    const job = created.data as DelegateJob
+    // Capacity check and creation are ONE critical section. They used to sit
+    // two awaits apart with no lock, so overlapping dispatches all read the same
+    // pre-create count and all passed: the cap was exact sequentially and
+    // unbounded under concurrency (reproduced: 3 accepted against a cap of 2).
+    // The section is deliberately short — it ends before the child is spawned —
+    // and `runRetry` re-enters `dispatch`, so it must never be held across a
+    // spawn or it would wait on itself.
+    const reserved = await this.reserve(async (): Promise<{ ok: true; job: DelegateJob } | { ok: false; result: DispatchResult }> => {
+      const max = this.cfg().delegation.maxConcurrent
+      const page = await this.listJobs(500)
+      const live = page.jobs.filter(job => isLiveStatus(job.status) || this.active.has(job.id)).length
+      if (live >= max) {
+        return { ok: false, result: NO(`at capacity: ${String(live)} of ${String(max)} concurrent delegation jobs are live (delegation.maxConcurrent); retry after one finishes.`) }
+      }
+      const created = await this.deps.store.createJob(createInput)
+      if (!created.ok) return { ok: false, result: NO(`createJob failed: ${neutralize(created.error)}`) }
+      return { ok: true, job: created.data as DelegateJob }
+    })
+    if (reserved.ok === false) return reserved.result
+    const job = reserved.job
     // store.createJob assembles job.json from its declared fields only, so the
     // additive projectId goes through the updateJob spread path.
     if (projectId !== undefined) {
@@ -485,11 +507,13 @@ export class DelegateService {
     // The write-back sequence itself runs BEFORE the terminal patch, so a crash
     // there only widens this narrow lost-job window; it can never leave a
     // terminal job whose side-effects are half done and unrecorded.
+    let artifactError: string | undefined
     try {
       const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
       if (!written.ok) throw new Error(written.error)
     } catch (error) {
-      this.deps.warn(`delegate: result.md write failed for ${job.id}: ${errorMessage(error)}`)
+      artifactError = errorMessage(error)
+      this.deps.warn(`delegate: result.md write failed for ${job.id}: ${artifactError}`)
     }
 
     // For the succeeded path, complete result.md BEFORE the terminal patch.
@@ -509,6 +533,7 @@ export class DelegateService {
         const written = await this.deps.store.writeStateFile(files.result, `${lines.join('\n')}\n`)
         if (!written.ok) throw new Error(written.error)
       } catch (error) {
+        artifactError = artifactError ?? errorMessage(error)
         this.deps.warn(`delegate: result.md write-back section failed for ${job.id}: ${errorMessage(error)}`)
       }
     }
@@ -527,6 +552,22 @@ export class DelegateService {
     // claimed a terminal outcome for a job about to run again — observers saw
     // a spurious `failed`, and the retry-chain poll stopped on it and missed an
     // attempt. `queued` is a live status, so the anti-corpse guarantee holds.
+    // A job that could not write its artifact gets NO disposition. Recording
+    // `dead-letter` (or `succeeded`) next to a missing result.md is exactly the
+    // inconsistency this ordering exists to prevent, so the job is recorded as
+    // `lost` — the vocabulary boot recovery already uses for an outcome that
+    // could not be recorded — and the reason stays on the row. It is terminal,
+    // so it neither hangs as `running` nor holds a concurrency slot.
+    if (artifactError !== undefined) {
+      await this.patch(job.id, {
+        status: asJobStatus('lost'),
+        lastError: `result.md could not be written: ${artifactError}`,
+        finishedAt,
+      })
+      this.deps.warn(`delegate: job ${job.id} recorded as lost, not ${terminalStatus}: result.md could not be written (${artifactError})`)
+      return
+    }
+
     if (willRetry) {
       const nextCount = retryCount + 1
       const delay = this.retryDelayMs(nextCount)
